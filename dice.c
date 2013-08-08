@@ -853,17 +853,17 @@ static int __devinit dice_probe(struct device *unit_dev)
 	 * management to pcm as well -> write dice_pcm_destroy and inject it into
 	 * suitable places
 	 */
-	err = fw_iso_resources_init(&dice->rx_resources, unit);
+	err = fw_iso_resources_init(&dice->pcm.playback.resources, unit);
 	if (err < 0)
 		goto err_owner;
-	dice->rx_resources.channels_mask = 0x00000000ffffffffuLL;
+	dice->pcm.playback.resources.channels_mask = 0x00000000ffffffffuLL;
 
 	if (vendor != OUI_MAUDIO) {
 		cip_flags = CIP_BLOCKING | CIP_HI_DUALWIRE;
 	} else {
 		cip_flags = CIP_BLOCKING;
 	}
-	err = amdtp_stream_init(&dice->rx_stream, unit, AMDTP_OUT_STREAM, cip_flags);
+	err = amdtp_stream_init(&dice->pcm.playback.stream, unit, AMDTP_OUT_STREAM, cip_flags);
 	if (err < 0)
 		goto err_resources;
 	/* > */
@@ -899,7 +899,7 @@ static int __devinit dice_probe(struct device *unit_dev)
 	return 0;
 
 err_resources:
-	fw_iso_resources_destroy(&dice->rx_resources);
+	fw_iso_resources_destroy(&dice->pcm.playback.resources);
 err_owner:
 	dice_owner_clear(dice);
 err_notification_handler:
@@ -953,7 +953,7 @@ static void dice_bus_reset(struct fw_unit *unit)
 
 	dice_owner_update(dice);
 
-	fw_iso_resources_update(&dice->rx_resources);
+	fw_iso_resources_update(&dice->pcm.playback.resources);
 
 	mutex_unlock(&dice->mutex);
 }

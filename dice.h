@@ -12,6 +12,16 @@
 #define DICE_NUM_MODES	3
 #define DICE_MAX_RX		4
 
+struct dice_stream {
+	struct fw_iso_resources resources;
+	struct amdtp_stream stream;
+};
+
+struct dice_pcm {
+	struct dice_stream playback;
+	struct dice_stream capture;
+};
+
 struct dice {
 	struct snd_card *card;
 	struct fw_unit *unit;
@@ -37,8 +47,8 @@ struct dice {
 	struct completion clock_accepted;
 	wait_queue_head_t hwdep_wait;
 	u32 notification_bits;
-	struct fw_iso_resources rx_resources;
-	struct amdtp_stream rx_stream;
+
+	struct dice_pcm pcm;
 };
 
 #define DICE_NUM_RATES	7

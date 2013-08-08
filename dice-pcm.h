@@ -3,18 +3,7 @@
 
 #include "dice.h"
 
-struct dice_pcm_substream_capture {
 
-};
-
-struct dice_pcm_substream_playback {
-
-};
-
-struct dice_pcm {
-	struct dice_pcm_substream_capture pcm_playback;
-	struct dice_pcm_substream_capture pcm_capture;
-};
 
 int dice_pcm_create(struct dice *dice /*, enum cip_flags*/);
 

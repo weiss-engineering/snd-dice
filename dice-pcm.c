@@ -7,6 +7,12 @@
 
 #include "../lib.h"
 
+#define DICE_DUPLEX	0
+
+static inline bool substream_is_playback(struct snd_pcm_substream *substream)
+{
+	return substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+}
 
 static int dice_rate_constraint(struct snd_pcm_hw_params *params,
 				struct snd_pcm_hw_rule *rule)
@@ -161,7 +167,7 @@ static void dice_free_resources(struct dice *dice)
 				   dice_rx_address(dice, i, RX_ISOCHRONOUS),
 				   &channel, 4, 0);
 
-	fw_iso_resources_free(&dice->rx_resources);
+	fw_iso_resources_free(&dice->pcm.playback.resources);
 }
 
 static int dice_allocate_resources(struct dice *dice)
@@ -170,16 +176,16 @@ static int dice_allocate_resources(struct dice *dice)
 	__be32 values[2];
 	int err;
 
-	if (dice->rx_resources.allocated)
+	if (dice->pcm.playback.resources.allocated)
 		return 0;
 
-	err = fw_iso_resources_allocate(&dice->rx_resources,
-			amdtp_stream_get_max_payload(&dice->rx_stream),
+	err = fw_iso_resources_allocate(&dice->pcm.playback.resources,
+			amdtp_stream_get_max_payload(&dice->pcm.playback.stream),
 			fw_parent_device(dice->unit)->max_speed);
 	if (err < 0)
 		return err;
 
-	values[0] = cpu_to_be32(dice->rx_resources.channel);
+	values[0] = cpu_to_be32(dice->pcm.playback.resources.channel);
 	seq_start = 0;
 	for (i = 0; i < dice->rx_count[dice->current_mode]; ++i) {
 		values[1] = cpu_to_be32(seq_start);
@@ -192,7 +198,7 @@ static int dice_allocate_resources(struct dice *dice)
 			return err;
 		}
 		seq_start += dice->rx[i].pcm_channels[dice->current_mode];
-		if (dice->rx_stream.dual_wire)
+		if (dice->pcm.playback.stream.dual_wire)
 			seq_start += dice->rx[i].pcm_channels[dice->current_mode];
 		seq_start += dice->rx[i].midi_ports[dice->current_mode] > 0;
 	}
@@ -204,18 +210,18 @@ static int dice_start_packet_streaming(struct dice *dice)
 {
 	int err;
 
-	if (amdtp_stream_running(&dice->rx_stream))
+	if (amdtp_stream_running(&dice->pcm.playback.stream))
 		return 0;
 
-	err = amdtp_stream_start(&dice->rx_stream,
-				 dice->rx_resources.channel,
+	err = amdtp_stream_start(&dice->pcm.playback.stream,
+				 dice->pcm.playback.resources.channel,
 				 fw_parent_device(dice->unit)->max_speed);
 	if (err < 0)
 		return err;
 
 	err = dice_ctrl_enable_set(dice);
 	if (err < 0) {
-		amdtp_stream_stop(&dice->rx_stream);
+		amdtp_stream_stop(&dice->pcm.playback.stream);
 		return err;
 	}
 
@@ -241,9 +247,9 @@ static int dice_start_streaming(struct dice *dice)
 
 void dice_stop_packet_streaming(struct dice *dice)
 {
-	if (amdtp_stream_running(&dice->rx_stream)) {
+	if (amdtp_stream_running(&dice->pcm.playback.stream)) {
 		dice_ctrl_enable_clear(dice);
-		amdtp_stream_stop(&dice->rx_stream);
+		amdtp_stream_stop(&dice->pcm.playback.stream);
 	}
 }
 
@@ -251,18 +257,18 @@ void dice_stop_streaming(struct dice *dice)
 {
 	dice_stop_packet_streaming(dice);
 
-	if (dice->rx_resources.allocated)
+	if (dice->pcm.playback.resources.allocated)
 		dice_free_resources(dice);
 }
 
 void dice_abort_streaming(struct dice *dice)
 {
-	amdtp_stream_pcm_abort(&dice->rx_stream);
+	amdtp_stream_pcm_abort(&dice->pcm.playback.stream);
 }
 
 void dice_destroy_streaming(struct dice *dice)
 {
-	amdtp_stream_destroy(&dice->rx_stream);
+	amdtp_stream_destroy(&dice->pcm.playback.stream);
 }
 
 static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
@@ -293,7 +299,7 @@ static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
 	midi_data_channels = 0;
 	for (rx = 0; rx < dice->rx_count[mode]; ++rx)
 		midi_data_channels += dice->rx[rx].midi_ports[mode] > 0;
-	amdtp_stream_set_parameters(&dice->rx_stream,
+	amdtp_stream_set_parameters(&dice->pcm.playback.stream,
 				    params_rate(hw_params),
 				    params_channels(hw_params),
 				    midi_data_channels);
@@ -305,26 +311,26 @@ static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
 	q = 0;
 	ch = 0;
 	m = 0;
-	if (!dice->rx_stream.dual_wire) {
+	if (!dice->pcm.playback.stream.dual_wire) {
 		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
 			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i)
-				dice->rx_stream.pcm_quadlets[ch++] = q++;
+				dice->pcm.playback.stream.pcm_quadlets[ch++] = q++;
 			if (dice->rx[rx].midi_ports[mode] > 0)
-				dice->rx_stream.midi_quadlets[m++] = q++;
+				dice->pcm.playback.stream.midi_quadlets[m++] = q++;
 		}
 	} else {
 		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
 			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i) {
-				dice->rx_stream.pcm_quadlets[ch++] = q;
+				dice->pcm.playback.stream.pcm_quadlets[ch++] = q;
 				q += 2;
 			}
 			if (dice->rx[rx].midi_ports[mode] > 0)
-				dice->rx_stream.midi_quadlets[m++] = q++;
+				dice->pcm.playback.stream.midi_quadlets[m++] = q++;
 		}
 		q = 1;
 		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
 			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i) {
-				dice->rx_stream.pcm_quadlets[ch++] = q;
+				dice->pcm.playback.stream.pcm_quadlets[ch++] = q;
 				q += 2;
 			}
 			q += dice->rx[rx].midi_ports[mode] > 0;
@@ -352,7 +358,7 @@ static int dice_pcm_prepare(struct snd_pcm_substream *substream)
 
 	mutex_lock(&dice->mutex);
 
-	if (amdtp_streaming_error(&dice->rx_stream))
+	if (amdtp_streaming_error(&dice->pcm.playback.stream))
 		dice_stop_packet_streaming(dice);
 
 	err = dice_start_streaming(dice);
@@ -363,7 +369,7 @@ static int dice_pcm_prepare(struct snd_pcm_substream *substream)
 
 	mutex_unlock(&dice->mutex);
 
-	amdtp_stream_pcm_prepare(&dice->rx_stream);
+	amdtp_stream_pcm_prepare(&dice->pcm.playback.stream);
 
 	return 0;
 }
@@ -383,19 +389,25 @@ static int dice_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	default:
 		return -EINVAL;
 	}
-	amdtp_stream_pcm_trigger(&dice->rx_stream, pcm);
+	amdtp_stream_pcm_trigger(&dice->pcm.playback.stream, pcm);
 
 	return 0;
 }
 
 static snd_pcm_uframes_t dice_pcm_pointer(struct snd_pcm_substream *substream)
 {
+	struct amdtp_stream* amdtps;
 	struct dice *dice = substream->private_data;
 
-	return amdtp_stream_pcm_pointer(&dice->rx_stream);
+	if (substream_is_playback(substream)) {
+		amdtps = &dice->pcm.playback.stream;
+	} else {
+		amdtps = &dice->pcm.capture.stream;
+	}
+	return amdtp_stream_pcm_pointer(amdtps);
 }
 
-static struct snd_pcm_ops ops = {
+static struct snd_pcm_ops ops_playback = {
 	.open      = dice_pcm_open,
 	.close     = dice_pcm_close,
 	.ioctl     = snd_pcm_lib_ioctl,
@@ -408,6 +420,22 @@ static struct snd_pcm_ops ops = {
 	.mmap      = snd_pcm_lib_mmap_vmalloc,
 };
 
+#if DICE_DUPLEX
+
+static struct snd_pcm_ops ops_capture = {
+	.open      = dice_pcm_open,
+	.close     = dice_pcm_close,
+	.ioctl     = snd_pcm_lib_ioctl,
+	.hw_params = dice_pcm_hw_params,
+	.hw_free   = dice_pcm_hw_free,
+	.prepare   = dice_pcm_prepare,
+	.trigger   = dice_pcm_trigger,
+	.pointer   = dice_pcm_pointer,
+	.page      = snd_pcm_lib_get_vmalloc_page,
+	.mmap      = snd_pcm_lib_mmap_vmalloc,
+};
+#endif
+
 int dice_pcm_create(struct dice *dice)
 {
 
@@ -419,7 +447,10 @@ int dice_pcm_create(struct dice *dice)
 		return err;
 	pcm->private_data = dice;
 	strcpy(pcm->name, dice->card->shortname);
-	pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream->ops = &ops;
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &ops_playback);
+#if DICE_DUPLEX
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &ops_capture);
+#endif
 
 	return 0;
 }
