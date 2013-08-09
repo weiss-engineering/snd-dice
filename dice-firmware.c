@@ -235,7 +235,6 @@ static struct dice_fl_file_vinfo_new* dice_fl_find_fw_desc(struct firmware const
 
 static int dice_fl_get_file_vinfo(struct firmware const* fw, struct dice_fl_file_vinfo_new** file_vinfo)
 {
-	int err;
 	struct dice_fl_file_vinfo_new* vinfo;
 
 	if (!fw || fw->size==0) {
