@@ -9,8 +9,26 @@
 #include "../iso-resources.h"
 #include "dice-interface.h"
 
+/** Number of sample rate modes. */
 #define DICE_NUM_MODES	3
-#define DICE_MAX_RX		4
+/** Maximum number of isochronous channels per direction. */
+#define DICE_MAX_FW_ISOC_CH		4
+
+struct audio_layout {
+	/** Number of isochronous fw channels for the individual modes. */
+	unsigned int count[DICE_NUM_MODES];
+	/** Total number of PCM channels for the individual modes (accumulated
+	 * PCM channels over all isochronous fw channels. */
+	unsigned int channels[DICE_NUM_MODES];
+	struct {
+		/** Number of PCM channels for the corresponding isochronous fw channel
+		 * for each DICE mode. */
+		u8 pcm_channels[DICE_NUM_MODES];
+		/** Number of MIDI ports for the corresponding isochronous fw channel
+		 * for each DICE mode. */
+		u8 midi_ports[DICE_NUM_MODES];
+	} isoc_layout[DICE_MAX_FW_ISOC_CH];
+};
 
 struct dice_stream {
 	struct fw_iso_resources resources;
@@ -32,12 +50,10 @@ struct dice {
 	unsigned int rx_offset;
 	unsigned int rx_size;
 	unsigned int clock_caps;
-	unsigned int rx_count[DICE_NUM_MODES];
-	unsigned int rx_channels[DICE_NUM_MODES];
-	struct {
-		u8 pcm_channels[DICE_NUM_MODES];
-		u8 midi_ports[DICE_NUM_MODES];
-	} rx[DICE_MAX_RX];
+
+	struct audio_layout rx;
+	struct audio_layout tx;
+
 	struct fw_address_handler fw_notification_handler;
 	int owner_generation;
 	int dev_lock_count; /* > 0 driver, < 0 userspace */

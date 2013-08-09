@@ -646,11 +646,12 @@ static int __devinit dice_read_mode_params(struct dice *dice, unsigned int mode)
 
 	rate_index = highest_supported_mode_rate(dice, mode);
 	if (rate_index < 0) {
-		dice->rx_count[mode] = 0;
-		dice->rx_channels[mode] = 0;
+		dice->rx.count[mode] = 0;
+		dice->rx.channels[mode] = 0;
 		return 0;
 	}
 
+	/* Why do we set the sample rate here? */
 	err = dice_ctrl_change_rate(dice, rate_index << CLOCK_RATE_SHIFT);
 	if (err < 0)
 		return err;
@@ -660,44 +661,44 @@ static int __devinit dice_read_mode_params(struct dice *dice, unsigned int mode)
 				 values, 4, 0);
 	if (err < 0)
 		return err;
-	dice->rx_count[mode] = be32_to_cpu(values[0]);
-	if (dice->rx_count[mode] > DICE_MAX_RX) {
+	dice->rx.count[mode] = be32_to_cpu(values[0]);
+	if (dice->rx.count[mode] > DICE_MAX_FW_ISOC_CH) {
 		dev_err(&dice->unit->device, "#rx(%u) = %u: too large\n",
-			mode, dice->rx_count[mode]);
+			mode, dice->rx.count[mode]);
 		return -ENXIO;
 	}
 
-	dice->rx_channels[mode] = 0;
-	for (i = 0; i < dice->rx_count[mode]; ++i) {
+	dice->rx.channels[mode] = 0;
+	for (i = 0; i < dice->rx.count[mode]; ++i) {
 		err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
 					 dice_rx_address(dice, i, RX_NUMBER_AUDIO),
 					 values, 2 * 4, 0);
 		if (err < 0)
 			return err;
-		dice->rx[i].pcm_channels[mode] = be32_to_cpu(values[0]);
-		dice->rx[i].midi_ports[mode]   = be32_to_cpu(values[1]);
-		if (dice->rx[i].pcm_channels[mode] > (mode < 2 ? 16 : 8) &&
+		dice->rx.isoc_layout[i].pcm_channels[mode] = be32_to_cpu(values[0]);
+		dice->rx.isoc_layout[i].midi_ports[mode]   = be32_to_cpu(values[1]);
+		if (dice->rx.isoc_layout[i].pcm_channels[mode] > (mode < 2 ? 16 : 8) &&
 		    (dice->vendor != OUI_MAUDIO || i > 0)) {
 			dev_err(&dice->unit->device,
 				"rx%u(%u): #PCM = %u: too large\n",
-				i, mode, dice->rx[i].pcm_channels[mode]);
+				i, mode, dice->rx.isoc_layout[i].pcm_channels[mode]);
 			return -ENXIO;
 		}
-		if (dice->rx[i].midi_ports[mode] > 8) {
+		if (dice->rx.isoc_layout[i].midi_ports[mode] > 8) {
 			dev_err(&dice->unit->device,
 				"rx%u(%u): #MIDI = %u: too large\n",
-				i, mode, dice->rx[i].midi_ports[mode]);
+				i, mode, dice->rx.isoc_layout[i].midi_ports[mode]);
 			return -ENXIO;
 		}
 
-		dice->rx_channels[mode] += dice->rx[i].pcm_channels[mode];
+		dice->rx.channels[mode] += dice->rx.isoc_layout[i].pcm_channels[mode];
 	}
 
-	if (dice->vendor == OUI_MAUDIO && dice->rx_count[mode] > 1) {
-		if (dice->rx[0].pcm_channels[mode] <= (mode < 2 ? 16 : 8))
-			dice->rx[0].pcm_channels[mode] =
-						dice->rx_channels[mode];
-		dice->rx_count[mode] = 1;
+	if (dice->vendor == OUI_MAUDIO && dice->rx.count[mode] > 1) {
+		if (dice->rx.isoc_layout[0].pcm_channels[mode] <= (mode < 2 ? 16 : 8))
+			dice->rx.isoc_layout[0].pcm_channels[mode] =
+						dice->rx.channels[mode];
+		dice->rx.count[mode] = 1;
 	}
 
 	return 0;

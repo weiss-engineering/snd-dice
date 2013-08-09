@@ -67,7 +67,7 @@ static int dice_rate_constraint(struct snd_pcm_hw_params *params,
 	for (i = 0; i < ARRAY_SIZE(dice_rates); ++i) {
 		mode = dice_rate_index_to_mode(i);
 		if ((dice->clock_caps & (1 << i)) &&
-		    snd_interval_test(channels, dice->rx_channels[mode])) {
+		    snd_interval_test(channels, dice->rx.channels[mode])) {
 			allowed_rates.min = min(allowed_rates.min,
 						dice_rates[i]);
 			allowed_rates.max = max(allowed_rates.max,
@@ -96,9 +96,9 @@ static int dice_channels_constraint(struct snd_pcm_hw_params *params,
 		    snd_interval_test(rate, dice_rates[i])) {
 			mode = dice_rate_index_to_mode(i);
 			allowed_channels.min = min(allowed_channels.min,
-						   dice->rx_channels[mode]);
+						   dice->rx.channels[mode]);
 			allowed_channels.max = max(allowed_channels.max,
-						   dice->rx_channels[mode]);
+						   dice->rx.channels[mode]);
 		}
 
 	return snd_interval_refine(channels, &allowed_channels);
@@ -139,11 +139,11 @@ static int dice_pcm_open(struct snd_pcm_substream *substream)
 	snd_pcm_limit_hw_rates(runtime);
 
 	for (i = 0; i < DICE_NUM_MODES; ++i)
-		if (dice->rx_channels[i]) {
+		if (dice->rx.channels[i]) {
 			runtime->hw.channels_min = min(runtime->hw.channels_min,
-						       dice->rx_channels[i]);
+						       dice->rx.channels[i]);
 			runtime->hw.channels_max = max(runtime->hw.channels_max,
-						       dice->rx_channels[i]);
+						       dice->rx.channels[i]);
 		}
 
 	err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_RATE,
@@ -199,7 +199,7 @@ static void dice_free_resources(struct dice *dice)
 	__be32 channel;
 
 	channel = cpu_to_be32((u32)-1);
-	for (i = 0; i < dice->rx_count[dice->current_mode]; ++i)
+	for (i = 0; i < dice->rx.count[dice->current_mode]; ++i)
 		snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
 				   dice_rx_address(dice, i, RX_ISOCHRONOUS),
 				   &channel, 4, 0);
@@ -224,7 +224,7 @@ static int dice_allocate_resources(struct dice *dice)
 
 	values[0] = cpu_to_be32(dice->pcm.playback.resources.channel);
 	seq_start = 0;
-	for (i = 0; i < dice->rx_count[dice->current_mode]; ++i) {
+	for (i = 0; i < dice->rx.count[dice->current_mode]; ++i) {
 		values[1] = cpu_to_be32(seq_start);
 		err = snd_fw_transaction(dice->unit,
 					 TCODE_WRITE_BLOCK_REQUEST,
@@ -234,10 +234,10 @@ static int dice_allocate_resources(struct dice *dice)
 			dice_free_resources(dice);
 			return err;
 		}
-		seq_start += dice->rx[i].pcm_channels[dice->current_mode];
+		seq_start += dice->rx.isoc_layout[i].pcm_channels[dice->current_mode];
 		if (dice->pcm.playback.stream.dual_wire)
-			seq_start += dice->rx[i].pcm_channels[dice->current_mode];
-		seq_start += dice->rx[i].midi_ports[dice->current_mode] > 0;
+			seq_start += dice->rx.isoc_layout[i].pcm_channels[dice->current_mode];
+		seq_start += dice->rx.isoc_layout[i].midi_ports[dice->current_mode] > 0;
 	}
 
 	return 0;
@@ -334,8 +334,8 @@ static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
 	dice->current_mode = mode;
 
 	midi_data_channels = 0;
-	for (rx = 0; rx < dice->rx_count[mode]; ++rx)
-		midi_data_channels += dice->rx[rx].midi_ports[mode] > 0;
+	for (rx = 0; rx < dice->rx.count[mode]; ++rx)
+		midi_data_channels += dice->rx.isoc_layout[rx].midi_ports[mode] > 0;
 	amdtp_stream_set_parameters(&dice->pcm.playback.stream,
 				    params_rate(hw_params),
 				    params_channels(hw_params),
@@ -349,28 +349,28 @@ static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
 	ch = 0;
 	m = 0;
 	if (!dice->pcm.playback.stream.dual_wire) {
-		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
-			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i)
+		for (rx = 0; rx < dice->rx.count[mode]; ++rx) {
+			for (i = 0; i < dice->rx.isoc_layout[rx].pcm_channels[mode]; ++i)
 				dice->pcm.playback.stream.pcm_quadlets[ch++] = q++;
-			if (dice->rx[rx].midi_ports[mode] > 0)
+			if (dice->rx.isoc_layout[rx].midi_ports[mode] > 0)
 				dice->pcm.playback.stream.midi_quadlets[m++] = q++;
 		}
 	} else {
-		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
-			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i) {
+		for (rx = 0; rx < dice->rx.count[mode]; ++rx) {
+			for (i = 0; i < dice->rx.isoc_layout[rx].pcm_channels[mode]; ++i) {
 				dice->pcm.playback.stream.pcm_quadlets[ch++] = q;
 				q += 2;
 			}
-			if (dice->rx[rx].midi_ports[mode] > 0)
+			if (dice->rx.isoc_layout[rx].midi_ports[mode] > 0)
 				dice->pcm.playback.stream.midi_quadlets[m++] = q++;
 		}
 		q = 1;
-		for (rx = 0; rx < dice->rx_count[mode]; ++rx) {
-			for (i = 0; i < dice->rx[rx].pcm_channels[mode]; ++i) {
+		for (rx = 0; rx < dice->rx.count[mode]; ++rx) {
+			for (i = 0; i < dice->rx.isoc_layout[rx].pcm_channels[mode]; ++i) {
 				dice->pcm.playback.stream.pcm_quadlets[ch++] = q;
 				q += 2;
 			}
-			q += dice->rx[rx].midi_ports[mode] > 0;
+			q += dice->rx.isoc_layout[rx].midi_ports[mode] > 0;
 		}
 	}
 
