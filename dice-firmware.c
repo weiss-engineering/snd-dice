@@ -331,7 +331,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 	if (err < 0) {
 		return err;
 	}
-	_dev_info(&dice->unit->device, " current firmware: vendor:%#x, product:%#x, FW version:%i.%i.%i.%i (%s, %s), SDK version:%i.%i.%i.%i",
+	_dev_info(&dice->unit->device, " current firmware: vendor:%#x, product:%i, FW:%i.%i.%i.%i (%s, %s), SDK:%i.%i.%i.%i",
 			cur_firmware_info.ui_vendor_id, cur_firmware_info.ui_product_id,
 			DICE_FW_VERSION32_MAJOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_MINOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_SUB(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_BUILD(cur_firmware_info.ui_application_version),
 			cur_firmware_info.build_date, cur_firmware_info.build_time,
@@ -339,7 +339,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 	if (!force) {
 		if ((file_firmware_info->ui_vendor_id != cur_firmware_info.ui_vendor_id) ||
 				(file_firmware_info->ui_product_id != cur_firmware_info.ui_product_id)) {
-			dev_warn(&dice->unit->device, "supplied firmware (vendor:%#x,prod:%#x) is incompatible with this DICE product (vendor:%#x,prod:%#x)",
+			dev_warn(&dice->unit->device, "supplied firmware (vendor:%#x,prod:%i) is incompatible with this DICE product (vendor:%#x,prod:%i)",
 					file_firmware_info->ui_vendor_id, file_firmware_info->ui_product_id,
 					cur_firmware_info.ui_vendor_id, cur_firmware_info.ui_product_id);
 			return -EPERM;
@@ -354,7 +354,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 			return -EPERM;
 		}
 	}
-	_dev_info(&dice->unit->device, "load new firmware: vendor:%#x, product:%#x, FW version:%i.%i.%i.%i (%s, %s), SDK version:%i.%i.%i.%i",
+	_dev_info(&dice->unit->device, "load new firmware: vendor:%#x, product:%i, FW:%i.%i.%i.%i (%s, %s), SDK:%i.%i.%i.%i",
 			file_firmware_info->ui_vendor_id, file_firmware_info->ui_product_id,
 			DICE_FW_VERSION32_MAJOR(file_firmware_info->ui_application_version),DICE_FW_VERSION32_MINOR(file_firmware_info->ui_application_version),DICE_FW_VERSION32_SUB(file_firmware_info->ui_application_version),DICE_FW_VERSION32_BUILD(file_firmware_info->ui_application_version),
 			file_firmware_info->build_date, file_firmware_info->build_time,
@@ -421,7 +421,7 @@ void dice_fl_firmware_async(const struct firmware *fw, void *context)
 		dev_err(&dice->unit->device, "firmware not found.\n");
 		goto fw_done;
 	}
-	_dev_info(&dice->unit->device, "firmware '%s' found (size: %i).\n",DICEFW_NAME,fw->size);
+	_dev_info(&dice->unit->device, "firmware found (size: %i).\n",fw->size);
 
 	err = dice_fl_upload(dice, fw, false);
 	if (err) {
@@ -432,16 +432,18 @@ fw_done:
 	dice_fl_firmware_failed(dice, fw);
 }
 
-int dice_fl_request_firmware(struct dice* dice)
+static int dice_fl_request_firmware(struct dice* dice)
 {
 	int err = 0;
 	struct firmware const* fw;
 
-	err = request_firmware(&fw, DICEFW_NAME, &dice->unit->device);
+#ifdef DEBUG_DICE_FW_BIN_NAME
+	err = request_firmware(&fw, DEBUG_DICE_FW_BIN_NAME, &dice->unit->device);
 	if (err < 0) {
 		dice_fl_firmware_failed(dice, fw);
 		return err;
 	}
+#endif
 
 	dice_fl_firmware_async(fw, dice);
 	return 0;

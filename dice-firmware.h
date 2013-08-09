@@ -5,7 +5,7 @@
 #include <linux/firmware.h>
 
 /* debug only: */
-#define DICEFW_NAME		"dice.bin"
+//#define DEBUG_DICE_FW_BIN_NAME		"dice.bin"
 
 struct dice_fl_vendor_img_info {
 	unsigned int ui_vproduct_id;
