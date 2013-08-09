@@ -14,6 +14,11 @@
 /** Maximum number of isochronous channels per direction. */
 #define DICE_MAX_FW_ISOC_CH		4
 
+enum dice_direction {
+	DICE_DIRECTION_RX = 0,
+	DICE_DIRECTION_TX = 1
+};
+
 struct audio_layout {
 	/** Number of isochronous fw channels for the individual modes. */
 	unsigned int count[DICE_NUM_MODES];
@@ -49,6 +54,8 @@ struct dice {
 	unsigned int global_offset;
 	unsigned int rx_offset;
 	unsigned int rx_size;
+	unsigned int tx_offset;
+	unsigned int tx_size;
 	unsigned int clock_caps;
 
 	struct audio_layout rx;
@@ -87,6 +94,13 @@ static inline u64 dice_rx_address(struct dice *dice,
 {
 	return DICE_PRIVATE_SPACE + dice->rx_offset +
 			index * dice->rx_size + offset;
+}
+
+static inline u64 dice_tx_address(struct dice *dice,
+			     unsigned int index, unsigned int offset)
+{
+	return DICE_PRIVATE_SPACE + dice->tx_offset +
+			index * dice->tx_size + offset;
 }
 
 int dice_ctrl_enable_set(struct dice *dice);
