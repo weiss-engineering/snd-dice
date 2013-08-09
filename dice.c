@@ -859,8 +859,6 @@ static int __devinit dice_probe(struct device *unit_dev)
 	struct snd_card *card;
 	struct dice *dice;
 	int vendor, err;
-	struct dice_fl_vendor_img_info img_info;
-	struct dice_fl_app_info app_info;
 	enum cip_flags cip_flags;
 
 	vendor = dice_interface_check(unit);
@@ -897,12 +895,9 @@ static int __devinit dice_probe(struct device *unit_dev)
 	if (err < 0)
 		goto err_owner;
 
-	err = dice_fl_get_cur_img(dice, &img_info);
-	if (err < 0)
-		goto err_owner;
-	err = dice_fl_get_cur_app(dice, &app_info);
-	if (err < 0)
-		goto err_owner;
+#if 0 /* DEBUG FIRMWARE LOAD: */
+	request_firmware_nowait(THIS_MODULE,1,DICEFW_NAME,unit_dev,GFP_KERNEL,dice,dice_fl_firmware_async);
+#endif
 
 	/* <
 	 * TODO: We should move all fw iso resource management and amdtp stream
