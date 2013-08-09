@@ -77,5 +77,6 @@ int dice_ctrl_enable_set(struct dice *dice);
 void dice_ctrl_enable_clear(struct dice *dice);
 
 int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate);
+int dice_ctrl_get_clock(struct dice *dice, u32 *clock);
 
 #endif

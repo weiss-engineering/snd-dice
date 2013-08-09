@@ -785,10 +785,7 @@ static void __devinit dice_card_strings(struct dice *dice)
 	strcpy(card->mixername, "DICE");
 }
 
-/* Does not stop streaming. Use dice_ctrl_change_clock_source to do that
- * outside init.
- */
-static int dice_set_clock_source(struct dice *dice, u32 clock_source)
+int dice_ctrl_get_clock(struct dice *dice, u32 *clock)
 {
 	int err;
 	__be32 clock_sel;
@@ -796,11 +793,29 @@ static int dice_set_clock_source(struct dice *dice, u32 clock_source)
 	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
 				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
 				 &clock_sel, 4, 0);
+	if (err == 0) {
+		*clock = be32_to_cpu(clock_sel);
+	}
+	return err;
+}
+
+/* Does not stop streaming. Use dice_ctrl_change_clock_source to do that
+ * outside init.
+ */
+static int dice_set_clock_source(struct dice *dice, u32 clock_source)
+{
+	int err;
+	u32 clock_sel;
+	__be32 clock_sel_be32;
+
+	err = dice_ctrl_get_clock(dice, &clock_sel);
 	if (err < 0)
 		return err;
 
-	clock_sel &= cpu_to_be32(~CLOCK_SOURCE_MASK);
-	clock_sel |= cpu_to_be32(CLOCK_SOURCE_ARX1);
+	clock_sel &= ~CLOCK_SOURCE_MASK;
+	clock_sel |= CLOCK_SOURCE_ARX1;
+	clock_sel_be32 = cpu_to_be32(clock_sel);
+
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
 				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
 				 &clock_sel, 4, 0);

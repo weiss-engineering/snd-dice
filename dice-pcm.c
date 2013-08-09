@@ -14,6 +14,43 @@ static inline bool substream_is_playback(struct snd_pcm_substream *substream)
 	return substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
 }
 
+static inline struct amdtp_stream*
+dice_amdtp_from_pcm_substream(struct snd_pcm_substream *substream)
+{
+	struct dice *dice = substream->private_data;
+
+	if (substream_is_playback(substream)) {
+		return &dice->pcm.playback.stream;
+	} else {
+		return &dice->pcm.capture.stream;
+	}
+}
+
+static int dice_get_stream_roles(struct dice *dice,
+		     enum amdtp_stream_sync_mode *sync_mode,
+		     struct amdtp_stream **master, struct amdtp_stream **slave)
+{
+	u32 clock;
+	int err;
+
+	err = dice_ctrl_get_clock(dice, &clock);
+	if (err < 0)
+		goto error;
+
+	if (clock & CLOCK_SOURCE_ARX1) {
+		*master = &dice->pcm.playback.stream;
+		*slave = &dice->pcm.capture.stream;
+		*sync_mode = AMDTP_STREAM_SYNC_MODE_MASTER;
+	} else {
+		*master = &dice->pcm.capture.stream;
+		*slave = &dice->pcm.playback.stream;
+		*sync_mode = AMDTP_STREAM_SYNC_MODE_SLAVE;
+	}
+
+error:
+	return err;
+}
+
 static int dice_rate_constraint(struct snd_pcm_hw_params *params,
 				struct snd_pcm_hw_rule *rule)
 {
@@ -350,7 +387,16 @@ static int dice_pcm_hw_free(struct snd_pcm_substream *substream)
 
 	return snd_pcm_lib_free_vmalloc_buffer(substream);
 }
+/*
+	struct snd_efw *efw = substream->private_data;
 
+	if (!amdtp_stream_wait_run(&efw->rx_stream))
+		return -EIO;
+
+	amdtp_stream_pcm_prepare(&efw->rx_stream);
+
+	return 0;
+ */
 static int dice_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct dice *dice = substream->private_data;
@@ -374,9 +420,9 @@ static int dice_pcm_prepare(struct snd_pcm_substream *substream)
 	return 0;
 }
 
+// OK
 static int dice_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	struct dice *dice = substream->private_data;
 	struct snd_pcm_substream *pcm;
 
 	switch (cmd) {
@@ -389,22 +435,15 @@ static int dice_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	default:
 		return -EINVAL;
 	}
-	amdtp_stream_pcm_trigger(&dice->pcm.playback.stream, pcm);
+	amdtp_stream_pcm_trigger(dice_amdtp_from_pcm_substream(substream), pcm);
 
 	return 0;
 }
 
+// OK
 static snd_pcm_uframes_t dice_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	struct amdtp_stream* amdtps;
-	struct dice *dice = substream->private_data;
-
-	if (substream_is_playback(substream)) {
-		amdtps = &dice->pcm.playback.stream;
-	} else {
-		amdtps = &dice->pcm.capture.stream;
-	}
-	return amdtp_stream_pcm_pointer(amdtps);
+	return amdtp_stream_pcm_pointer(dice_amdtp_from_pcm_substream(substream));
 }
 
 static struct snd_pcm_ops ops_playback = {
