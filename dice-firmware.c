@@ -9,25 +9,10 @@
 #include <linux/delay.h>
 #include <linux/firewire.h>
 #include <linux/firewire-constants.h>
+#include "../lib.h"
+#include "dice.h"
 #include "dice-interface.h"
 #include "dice-firmware.h"
-#include "../lib.h"
-
-struct dice_fl_img_desc {
-	char name[16];
-	unsigned int flash_base;
-	unsigned int mem_base;
-	unsigned int size;
-	unsigned int entry_point;
-	unsigned int length;
-	unsigned int chk_sum;
-	unsigned int ui_board_serial_number;
-	unsigned int ui_version_high;
-	unsigned int ui_version_low;
-	unsigned int ui_configuration_flags;
-	char build_time[64];
-	char build_date[64];
-};
 
 /*
  * Firmware loading is handled by the "DICE firmwareloader" interface.  Its registers are
@@ -52,13 +37,13 @@ struct dice_fl_img_desc {
 #define  OPCODE_CREATE_IMAGE2	0x0000000b
 #define  OPCODE_GET_APP_INFO	0x0000000c
 #define  OPCODE_EXECUTE			0x80000000
-#define FIRMWARE_RETURN_STATUS		0x008
+#define FIRMWARE_RETURN_STATUS	0x008
 #define FIRMWARE_PROGRESS		0x00c
 #define  PROGRESS_CURR_MASK		0x00000fff
 #define  PROGRESS_MAX_MASK		0x00fff000
 #define  PROGRESS_TOUT_MASK		0x0f000000
 #define  PROGRESS_FLAG			0x80000000
-#define FIRMWARE_CAPABILITIES		0x010
+#define FIRMWARE_CAPABILITIES	0x010
 #define  FL_CAP_AUTOERASE		0x00000001
 #define  FL_CAP_PROGRESS		0x00000002
 #define FIRMWARE_DATA			0x02c
@@ -69,21 +54,38 @@ struct dice_fl_img_desc {
 #define  CMD_SET_MODE			0x00000005
 #define  CMD_SET_MIDIBP			0x00000006
 #define  CMD_GET_AVSPHASE		0x00000007
-#define  CMD_ENABLE_BNC_SYNC		0x00000008
+#define  CMD_ENABLE_BNC_SYNC	0x00000008
 #define  CMD_PULSE_BNC_SYNC		0x00000009
 #define  CMD_EMUL_SLOW_CMD		0x0000000a
 #define FIRMWARE_TEST_DELAY		0xfd8
 #define FIRMWARE_TEST_BUF		0xfdc
 
 /**
+ * DICE Error Codes:
+ */
+#define NO_ERROR				0x0
+#define E_GEN					0xFF000000	// Generic errors
+#define  E_GEN_NOMATCH			(E_GEN+0)
+#define  E_GEN_ILLEGAL_PARAM	(E_GEN+1)
+#define  E_GEN_WRONG_CONTEXT	(E_GEN+2)	// General error when a function is called from wrong context
+#define E_FIS					0xC5000000	// FIS errors
+#define  E_FIS_ILLEGAL_IMAGE	(E_FIS+1)
+#define  E_FIS_FLASH_OP_FAILED	(E_FIS+2)
+#define  E_FIS_NO_SPACE			(E_FIS+3)
+#define  E_FIS_MEMORY_ERROR		(E_FIS+4)
+#define E_DICE					0xC3000000	// All other codes
+#define  E_DICE_BAD_INPUT_PARAM	(E_DICE+3)	// Wrong input paramet for function
+
+/**
  * DICE firmwareloader execute command with opcode.
  * Sets the executable bit & waits for it to be cleared. Then reads and returns
  * the return status.
  */
-static int dice_fl_exec(struct dice* dice, unsigned int const opcode, unsigned int t_sleep)
+static int dice_fl_exec(struct dice* dice, unsigned int const opcode, bool req_response, unsigned int t_sleep)
 {
 	int err;
 	__be32 value;
+	u8 attempts = 10;
 
 	value = cpu_to_be32((opcode & OPCODE_MASK) | OPCODE_EXECUTE);
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
@@ -93,6 +95,9 @@ static int dice_fl_exec(struct dice* dice, unsigned int const opcode, unsigned i
 		dev_warn(&dice->unit->device, "FL opcode (%#x->%#llx) exec failed: %i.",opcode,DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_OPCODE,err);
 		return err;
 	}
+	if (!req_response) {
+		return NO_ERROR;
+	}
 	/* TODO: use some sort of wait queue instead of sleeping */
 	while(1) {
 		msleep(t_sleep);
@@ -100,10 +105,15 @@ static int dice_fl_exec(struct dice* dice, unsigned int const opcode, unsigned i
 							DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_OPCODE,
 							&value, 4, 0);
 		if (err < 0) {
+			dev_warn(&dice->unit->device, "FL opcode status failed (%i).",err);
 			return err;
 		}
 		if ((value & cpu_to_be32(OPCODE_EXECUTE)) == 0) {
 			break;
+		}
+		if (attempts--) {
+			_dev_info(&dice->unit->device, "exec attempt %i...", attempts);
+			continue;
 		}
 		dev_warn(&dice->unit->device, "FL opcode exec timeout.");
 		return -EIO;
@@ -113,20 +123,118 @@ static int dice_fl_exec(struct dice* dice, unsigned int const opcode, unsigned i
 					DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_RETURN_STATUS,
 					&value, 4, 0);
 	if (err < 0) {
+		dev_warn(&dice->unit->device, "FL opcode return failed (%i).",err);
 		return err;
 	}
 	return be32_to_cpu(value);
 }
 
-int dice_fl_get_cur_img(struct dice* dice, struct dice_fl_vendor_img_info* img_info)
+struct dice_fl_img_desc {
+	char name[16];
+	unsigned int flash_base;
+	unsigned int mem_base;
+	unsigned int size;
+	unsigned int entry_point;
+	unsigned int length;
+	unsigned int chk_sum;
+	unsigned int ui_board_serial_number;
+	unsigned int ui_version_high;
+	unsigned int ui_version_low;
+	unsigned int ui_configuration_flags;
+	char build_time[64];
+	char build_date[64];
+};
+
+static int dice_fl_get_img_desc(struct dice* dice, struct dice_fl_img_desc* img_desc, unsigned int image_id)
+{
+	int err;
+	__be32 values[10];
+	unsigned int i;
+
+	values[0] = cpu_to_be32(image_id);
+	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
+						DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA,
+						values, 4, 0);
+	if (err < 0) {
+		return err;
+	}
+	err = dice_fl_exec(dice, OPCODE_GET_IMAGE_DESC, true, 20);
+	if (err != NO_ERROR) {
+		return -EIO;
+	}
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
+			DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA,
+			img_desc->name, sizeof(img_desc->name), 0);
+	if (err >= 0) {
+		/* DICE strings are returned in "always-wrong" endianness */
+		BUILD_BUG_ON(sizeof(img_desc->name) % 4 != 0);
+		for (i = 0; i < sizeof(img_desc->name); i += 4)
+			swab32s((u32 *)&img_desc->name[i]);
+		img_desc->name[sizeof(img_desc->name) - 1] = '\0';
+	}
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
+			DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA + sizeof(img_desc->name),
+			values, 4*10, 0);
+	img_desc->flash_base = be32_to_cpu(values[0]);
+	img_desc->mem_base = be32_to_cpu(values[1]);
+	img_desc->size = be32_to_cpu(values[2]);
+	img_desc->entry_point = be32_to_cpu(values[3]);
+	img_desc->length = be32_to_cpu(values[4]);
+	img_desc->chk_sum = be32_to_cpu(values[5]);
+	img_desc->ui_board_serial_number = be32_to_cpu(values[6]);
+	img_desc->ui_version_high = be32_to_cpu(values[7]);
+	img_desc->ui_version_low = be32_to_cpu(values[8]);
+	img_desc->ui_configuration_flags = be32_to_cpu(values[9]);
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
+			DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA  + sizeof(img_desc->name) + 4*10,
+			img_desc->build_time, sizeof(img_desc->build_time), 0);
+	if (err >= 0) {
+		/* DICE strings are returned in "always-wrong" endianness */
+		BUILD_BUG_ON(sizeof(img_desc->build_time) % 4 != 0);
+		for (i = 0; i < sizeof(img_desc->build_time); i += 4)
+			swab32s((u32 *)&img_desc->build_time[i]);
+		img_desc->build_time[sizeof(img_desc->build_time) - 1] = '\0';
+	}
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
+			DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA  + sizeof(img_desc->name) + 4*10 + sizeof(img_desc->build_time),
+			img_desc->build_date, sizeof(img_desc->build_date), 0);
+	if (err >= 0) {
+		/* DICE strings are returned in "always-wrong" endianness */
+		BUILD_BUG_ON(sizeof(img_desc->build_date) % 4 != 0);
+		for (i = 0; i < sizeof(img_desc->build_date); i += 4)
+			swab32s((u32 *)&img_desc->build_date[i]);
+		img_desc->build_date[sizeof(img_desc->build_date) - 1] = '\0';
+	}
+	_dev_info(&dice->unit->device, "Image description %i: '%s'", image_id, img_desc->name);
+	_dev_info(&dice->unit->device, "  flash_base:%#x, mem_base:%#x, size:%#x, entry:%#x", img_desc->flash_base, img_desc->mem_base, img_desc->size, img_desc->entry_point);
+	_dev_info(&dice->unit->device, "  len:%#x, chkSum:%#x, serial:%i, version:%i-%i, config:%#x", img_desc->length, img_desc->chk_sum, img_desc->ui_board_serial_number, img_desc->ui_version_high, img_desc->ui_version_low, img_desc->ui_configuration_flags);
+	_dev_info(&dice->unit->device, "  built: %s, %s", img_desc->build_date, img_desc->build_time);
+
+	return err;
+}
+
+struct dice_fl_vendor_img_info {
+	unsigned int ui_vproduct_id;
+	char ui_vendor_id[8];
+	unsigned int ui_vmajor;
+	unsigned int ui_vminor;
+	unsigned int user1;
+	unsigned int user2;
+};
+
+static int dice_fl_get_cur_img(struct dice* dice, struct dice_fl_vendor_img_info* img_info)
 {
 	int err;
 	__be32 values[4];
 	unsigned int i;
 
 	_dev_info(&dice->unit->device, "Get running image vinfo...");
-	err = dice_fl_exec(dice, OPCODE_GET_RUNNING_IMAGE_VINFO, 20);
-	if (err != 0) {
+	err = dice_fl_exec(dice, OPCODE_GET_RUNNING_IMAGE_VINFO, true, 20);
+	if (err != NO_ERROR) {
 		return -EIO;
 	}
 	_dev_info(&dice->unit->device, "Read running image vinfo...");
@@ -186,11 +294,10 @@ int dice_fl_get_cur_img(struct dice* dice, struct dice_fl_vendor_img_info* img_i
 #define DICE_FW_VERSION32_SUB(v32)		(((v32)&DICE_FW_VERSION_MASK_SUB)>>16)
 #define DICE_FW_VERSION32_BUILD(v32)	( (v32)&DICE_FW_VERSION_MASK_BUILD)
 
-#define DICEFW_MAGIC_SIZE						36
-#define TCAT_DICE_VERSION_MAGIC_STRING			"56448A3A-77AB-4631-A34D-5CD917EE4B24"
-#define TCAT_DICE_VERSION_NEW_MAGIC_STRING		"B3F35591-997E-43dc-92BC-0904EFE8BC2B"
-struct dice_fl_file_vinfo_new {
-	char magic_num[DICEFW_MAGIC_SIZE];			//< == kTCAT_DICE_VERSION_NEW_MAGIC_STRING
+#define DICE_FW_MAGIC_SIZE					36
+#define TCAT_DICE_VERSION_MAGIC_STRING		"B3F35591-997E-43dc-92BC-0904EFE8BC2B"
+struct dice_fl_file_vinfo {
+	char magic_num[DICE_FW_MAGIC_SIZE];	//< == TCAT_DICE_VERSION_MAGIC_STRING
 	unsigned int ui_base_sdk_version;
 	unsigned int ui_application_version;
 	unsigned int ui_vendor_id;
@@ -198,22 +305,23 @@ struct dice_fl_file_vinfo_new {
 	char build_time[64];
 	char build_date[64];
 };
-struct dice_fl_file_vinfo {
-	char magic_num[DICEFW_MAGIC_SIZE];			//< == kTCAT_DICE_VERSION_MAGIC_STRING
-	char major[5];				//< 4 digits followed by a space
-	char minor[5];				//< 4 digits followed by a space
-	char vendor_id[7];			//< 6 digit 24-bit OUI (as defined in targetVendorDefs.h) followed by a space
-	char v_product_id[4];		//< 3 digit (10 bits) Product ID (as defined in targetVendorDefs.h) followed by a space
-	char v_major[5];			//< 4 digits followed by a space
-	char v_minor[5];			//< 4 digits followed by a space
+
+#define TCAT_DICE_VERSION_OLD_MAGIC_STRING	"56448A3A-77AB-4631-A34D-5CD917EE4B24"
+struct dice_fl_file_vinfo_old {
+	char magic_num[DICE_FW_MAGIC_SIZE];		//< == TCAT_DICE_VERSION_OLD_MAGIC_STRING
+	char major[5];			//< 4 digits followed by a space
+	char minor[5];			//< 4 digits followed by a space
+	char vendor_id[7];		//< 6 digit 24-bit OUI (as defined in targetVendorDefs.h) followed by a space
+	char v_product_id[4];	//< 3 digit (10 bits) Product ID (as defined in targetVendorDefs.h) followed by a space
+	char v_major[5];		//< 4 digits followed by a space
+	char v_minor[5];		//< 4 digits followed by a space
 };
 
-static struct dice_fl_file_vinfo_new* dice_fl_find_fw_desc(struct firmware const* fw)
+static struct dice_fl_file_vinfo* dice_fl_find_fw_desc(struct firmware const* fw)
 {
 	int scan = 0, found = 0;
-	char const magic[DICEFW_MAGIC_SIZE] = { TCAT_DICE_VERSION_NEW_MAGIC_STRING };
-
-	while (scan < fw->size - sizeof(struct dice_fl_file_vinfo_new)) {
+	char const magic[DICE_FW_MAGIC_SIZE] = { TCAT_DICE_VERSION_MAGIC_STRING };
+	while (scan < fw->size - sizeof(struct dice_fl_file_vinfo)) {
 		if (fw->data[scan++] == magic[found]) {
 			found++;
 		} else {
@@ -226,17 +334,15 @@ static struct dice_fl_file_vinfo_new* dice_fl_find_fw_desc(struct firmware const
 			break;
 		}
 	}
-
 	if (found != sizeof(magic)) {
 		return NULL;
 	}
-
 	return (void *)&fw->data[scan - found];
 }
 
-static int dice_fl_get_file_vinfo(struct firmware const* fw, struct dice_fl_file_vinfo_new** file_vinfo)
+static int dice_fl_get_file_vinfo(struct firmware const* fw, struct dice_fl_file_vinfo** file_vinfo)
 {
-	struct dice_fl_file_vinfo_new* vinfo;
+	struct dice_fl_file_vinfo* vinfo;
 
 	if (!fw || fw->size==0) {
 		return -ENOENT;
@@ -250,14 +356,24 @@ static int dice_fl_get_file_vinfo(struct firmware const* fw, struct dice_fl_file
 	return 0;
 }
 
+struct dice_fl_app_info {
+	unsigned int ui_base_sdk_version;		// [31-29]:buildFlags,[28-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
+	unsigned int ui_application_version;	// [31-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
+	unsigned int ui_vendor_id;
+	unsigned int ui_product_id;
+	char build_time[64];
+	char build_date[64];
+	unsigned int ui_board_serial_number;
+};
+
 int dice_fl_get_cur_app(struct dice* dice, struct dice_fl_app_info* app_info)
 {
 	int err;
 	__be32 values[4];
 	unsigned int i;
 
-	err = dice_fl_exec(dice, OPCODE_GET_APP_INFO, 20);
-	if (err != 0) {
+	err = dice_fl_exec(dice, OPCODE_GET_APP_INFO, true, 20);
+	if (err != NO_ERROR) {
 		return -EIO;
 	}
 	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
@@ -306,6 +422,9 @@ int dice_fl_get_cur_app(struct dice* dice, struct dice_fl_app_info* app_info)
 }
 
 #define DICE_FL_UPLOAD_BLOCKSIZE		1004
+/**
+ * Upload firmware in blocks, calculate & compare image checksum.
+ */
 static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 {
 	int err = 0;
@@ -328,6 +447,7 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 		return -ENOMEM;
 	}
 	while (index < fw->size) {
+		/* this block's length: either blocksize or rest of firmware data */
 		block_len = min_t(size_t, DICE_FL_UPLOAD_BLOCKSIZE, fw->size - index);
 		values[0] = cpu_to_be32(index);
 		values[1] = cpu_to_be32(block_len);
@@ -339,6 +459,11 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 			goto upload_err;
 		}
 		memcpy(upload_buffer, fw->data + index, block_len);
+		for (i = 0; i < block_len; i += 4) {
+			/* Calculate checksum & swap bytes for correct endianness. */
+			checksum += upload_buffer[i]+upload_buffer[i+1]+upload_buffer[i+2]+upload_buffer[i+3];
+			swab32s((u32 *)&upload_buffer[i]);
+		}
 		err = snd_fw_transaction(dice->unit, TCODE_WRITE_BLOCK_REQUEST,
 				DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA + 4*2,
 				upload_buffer, block_len, 0);
@@ -346,15 +471,11 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 			dev_err(&dice->unit->device, "firmware upload block (index:%#x, block_len:%#x) error", index, block_len);
 			goto upload_err;
 		}
-		err = dice_fl_exec(dice, OPCODE_UPLOAD, 1);
-		if (err != 0) {
-			dev_err(&dice->unit->device, "firmware upload error");
+		err = dice_fl_exec(dice, OPCODE_UPLOAD, true, 10);
+		if (err != NO_ERROR) {
+			dev_err(&dice->unit->device, "firmware upload error (%#x)", err);
 			err = -EIO;
 			goto upload_err;
-		}
-		i=0;
-		for (;i<block_len;i++) {
-			checksum += upload_buffer[i];
 		}
 		index += block_len;
 //		if (((100*index/fw->size) % 10 == 0) && ((100*index/fw->size) != debug_progr)) {
@@ -371,9 +492,9 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 		dev_err(&dice->unit->device, "firmware upload stat data error");
 		return err;
 	}
-	err = dice_fl_exec(dice, OPCODE_UPLOAD_STAT, 50);
-	if (err != 0) {
-		dev_err(&dice->unit->device, "firmware upload stat error");
+	err = dice_fl_exec(dice, OPCODE_UPLOAD_STAT, true, 50);
+	if (err != NO_ERROR) {
+		dev_err(&dice->unit->device, "firmware upload stat error (%#x)", err);
 		return -EIO;
 	}
 	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
@@ -404,10 +525,10 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 	int err;
 	char img_name[16] = DICE_FIRMWARE_IMG_NAME;
 	__be32 values[3];
-	unsigned int i, length;
+	unsigned int i;
 
 	struct dice_fl_app_info cur_firmware_info;
-	struct dice_fl_file_vinfo_new* file_firmware_info;
+	struct dice_fl_file_vinfo* file_firmware_info;
 
 	err = dice_fl_get_file_vinfo(fw, &file_firmware_info);
 	if (err < 0) {
@@ -420,6 +541,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 	if (err < 0) {
 		return err;
 	}
+
 	_dev_info(&dice->unit->device, " current firmware: vendor:%#x, product:%i, FW:%i.%i.%i.%i (%s, %s), SDK:%i.%i.%i.%i",
 			cur_firmware_info.ui_vendor_id, cur_firmware_info.ui_product_id,
 			DICE_FW_VERSION32_MAJOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_MINOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_SUB(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_BUILD(cur_firmware_info.ui_application_version),
@@ -439,6 +561,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 					DICE_FW_VERSION32_MAJOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_MINOR(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_SUB(cur_firmware_info.ui_application_version),DICE_FW_VERSION32_BUILD(cur_firmware_info.ui_application_version));
 			return -EPERM;
 		}
+#ifndef DEBUG_DICE_FW_BIN_NAME
 		if ((file_firmware_info->ui_application_version == cur_firmware_info.ui_application_version) &&
 				file_firmware_info->ui_base_sdk_version <= cur_firmware_info.ui_base_sdk_version) {
 			dev_warn(&dice->unit->device, "supplied firmware (%i.%i.%i.%i, SDK:%i.%i.%i.%i) is inferior to current DICE firmware (%i.%i.%i.%i, SDK:%i.%i.%i.%i)",
@@ -448,6 +571,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 					SDK_VERSION32_MAJOR(cur_firmware_info.ui_base_sdk_version),SDK_VERSION32_MINOR(cur_firmware_info.ui_base_sdk_version),SDK_VERSION32_SUB(cur_firmware_info.ui_base_sdk_version),SDK_VERSION32_BUILD(cur_firmware_info.ui_base_sdk_version));
 			return -EPERM;
 		}
+#endif
 	}
 	_dev_info(&dice->unit->device, "load new firmware: vendor:%#x, product:%i, FW:%i.%i.%i.%i (%s, %s), SDK:%i.%i.%i.%i",
 			file_firmware_info->ui_vendor_id, file_firmware_info->ui_product_id,
@@ -460,44 +584,55 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 		swab32s((u32 *)&img_name[i]);
 	img_name[sizeof(img_name) - 1] = '\0';
 
-	/* TODO: Upload in blocks of 1KB, calculate & compare 32bit checksum after each block */
+	/* Upload in blocks, calculate & compare 32bit checksum */
 	err = dice_fl_upload_blocks(dice, fw);
 	if (err < 0) {
 		return err;
 	}
-	dev_warn(&dice->unit->device, "aborted load.");
-	return 1;
 
 	/* Delete old "dice" image */
+	_dev_info(&dice->unit->device, "deleting old '%s' image...", DICE_FIRMWARE_IMG_NAME);
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_BLOCK_REQUEST,
 					DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA,
 					img_name, sizeof(img_name), 0);
 	if (err < 0) {
+		dev_warn(&dice->unit->device, "delete param failed");
 		return err;
 	}
-	err = dice_fl_exec(dice, OPCODE_DELETE_IMAGE, 300);
-	if (err != 0) {
-		return -EIO;
+	err = dice_fl_exec(dice, OPCODE_DELETE_IMAGE, true, 1000);
+	if (err != NO_ERROR) {
+		dev_warn(&dice->unit->device, "delete op failed (%#x)", err);
+		if (err != E_FIS_ILLEGAL_IMAGE) {
+			return -EIO;
+		}
 	}
 
 	/* Create new "dice" image */
-	values[0] = cpu_to_be32(length);
+	_dev_info(&dice->unit->device, "creating new '%s' image (len:%#x,exec:%#x,entry:%#x)...",DICE_FIRMWARE_IMG_NAME,fw->size,DICE_FIRMWARE_IMG_EXEC_ADDR,DICE_FIRMWARE_IMG_ENTRY_ADDR);
+	values[0] = cpu_to_be32(fw->size);
 	values[1] = cpu_to_be32(DICE_FIRMWARE_IMG_EXEC_ADDR);
 	values[2] = cpu_to_be32(DICE_FIRMWARE_IMG_ENTRY_ADDR);
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_BLOCK_REQUEST,
 						DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA,
 						values, 4*3, 0);
+	if (err < 0) {
+		dev_warn(&dice->unit->device, "create param failed");
+		return err;
+	}
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_BLOCK_REQUEST,
 						DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA + 4*3,
 						img_name, sizeof(img_name), 0);
-	err = dice_fl_exec(dice, OPCODE_CREATE_IMAGE, 300);
-	if (err != 0) {
+	err = dice_fl_exec(dice, OPCODE_CREATE_IMAGE, true, 1000);
+	if (err != NO_ERROR) {
+		dev_warn(&dice->unit->device, "create op failed (%#x)", err);
 		return -EIO;
 	}
 
 	/* Reset device */
-	err = dice_fl_exec(dice, OPCODE_RESET_IMAGE, 20);
-	if (err != 0) {
+	_dev_info(&dice->unit->device, "resetting device...");
+	err = dice_fl_exec(dice, OPCODE_RESET_IMAGE, false, 20);
+	if (err != NO_ERROR) {
+		dev_warn(&dice->unit->device, "reset op failed (%#x)", err);
 		return -EIO;
 	}
 
@@ -545,5 +680,5 @@ static int dice_fl_request_firmware(struct dice* dice)
 #endif
 
 	dice_fl_firmware_async(fw, dice);
-	return 0;
+	return err;
 }
