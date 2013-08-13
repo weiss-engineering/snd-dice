@@ -45,6 +45,16 @@ struct dice_pcm {
 	struct dice_stream capture;
 };
 
+struct dice_firmware_info {
+	unsigned int ui_base_sdk_version;		// [31-29]:buildFlags,[28-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
+	unsigned int ui_application_version;	// [31-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
+	unsigned int ui_vendor_id;
+	unsigned int ui_product_id;
+	char build_time[64];
+	char build_date[64];
+	unsigned int ui_board_serial_number;
+};
+
 struct dice {
 	struct snd_card *card;
 	struct fw_unit *unit;
@@ -72,6 +82,7 @@ struct dice {
 	u32 notification_bits;
 
 	struct dice_pcm pcm;
+	struct dice_firmware_info app_info;
 };
 
 #define DICE_NUM_RATES	7

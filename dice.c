@@ -523,6 +523,7 @@ static void dice_proc_read(struct snd_info_entry *entry,
 			snd_iprintf(buffer, "%x\n",
 				    buf.ext_sync.adat_user_data);
 	}
+	dice_firmware_proc_read(dice, buffer);
 }
 
 static void dice_create_proc(struct dice *dice)
@@ -892,6 +893,10 @@ static int __devinit dice_probe(struct device *unit_dev)
 		goto err_notification_handler;
 
 	err = dice_read_params(dice);
+	if (err < 0)
+		goto err_owner;
+
+	err = dice_firmware_info_read(dice);
 	if (err < 0)
 		goto err_owner;
 

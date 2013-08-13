@@ -2,10 +2,14 @@
 #define SOUND_FIREWIRE_DICEFIRMWARE_H_INCLUDED
 
 #include <linux/firmware.h>
+#include <sound/info.h>
+#include "dice.h"
 
 /* debug only: */
 //#define DEBUG_DICE_FW_BIN_NAME		"dice.bin"
 
-void dice_fl_firmware_async(const struct firmware *fw, void *context);
+int dice_firmware_info_read(struct dice* dice);
+void dice_firmware_load_async(const struct firmware *fw, void *context);
+void dice_firmware_proc_read(const struct dice *dice, struct snd_info_buffer *buffer);
 
 #endif
