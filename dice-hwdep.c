@@ -153,7 +153,14 @@ static int dice_hwdep_ioctl(struct snd_hwdep *hwdep, struct file *file,
 
 static int dice_hwdep_dsp_status(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_status *dsp_status)
 {
-//	struct dice *dice = hwdep->private_data;
+	struct dice *dice = hwdep->private_data;
+	unsigned int i;
+	dsp_status->num_dsps = 1;
+	dsp_status->chip_ready = 1;
+	snprintf(dsp_status->id, sizeof(dsp_status->id),"dice-%08x-%08x", dice->app_info.ui_vendor_id, dice->app_info.ui_product_id);
+	for (i=0; i<dsp_status->num_dsps && i<sizeof(dsp_status->dsp_loaded); i++) {
+		dsp_status->dsp_loaded |= BIT(i);
+	}
 	return 0;
 }
 
