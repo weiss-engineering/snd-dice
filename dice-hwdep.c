@@ -1,9 +1,11 @@
 
 #include "dice-hwdep.h"
+#include "dice-firmware.h"
 
 #include <sound/core.h>
 #include <sound/firewire.h>
 #include <sound/hwdep.h>
+#include <linux/firmware.h>
 
 static long dice_hwdep_read(struct snd_hwdep *hwdep, char __user *buf,
 			    long count, loff_t *offset)
@@ -149,6 +151,35 @@ static int dice_hwdep_ioctl(struct snd_hwdep *hwdep, struct file *file,
 	}
 }
 
+static int dice_hwdep_dsp_status(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_status *dsp_status)
+{
+//	struct dice *dice = hwdep->private_data;
+	return 0;
+}
+
+static int dice_hwdep_dsp_load(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_image *dsp_image)
+{
+	struct dice *dice = hwdep->private_data;
+	int err;
+	struct firmware fw = {
+			.size = dsp_image->length,
+			.data = vmalloc(fw.size),
+	};
+	if (!fw.data) {
+		dev_warn(&dice->unit->device, "can't allocate firmware image (%u bytes)", fw.size);
+		return -ENOMEM;
+	}
+	if (copy_from_user((void *)fw.data, dsp_image->image, dsp_image->length)) {
+		err = -EFAULT;
+		goto fw_load_done;
+	}
+	err = dice_firmware_load(dice, &fw, (dsp_image->driver_data & DICE_HWDEP_LOADDSP_DRV_FLAG_FORCE)!=0);
+
+fw_load_done:
+	vfree(fw.data);
+	return err;
+}
+
 #ifdef CONFIG_COMPAT
 static int dice_hwdep_compat_ioctl(struct snd_hwdep *hwdep, struct file *file,
 				   unsigned int cmd, unsigned long arg)
@@ -168,6 +199,8 @@ int dice_create_hwdep(struct dice *dice)
 		.poll         = dice_hwdep_poll,
 		.ioctl        = dice_hwdep_ioctl,
 		.ioctl_compat = dice_hwdep_compat_ioctl,
+		.dsp_status   = dice_hwdep_dsp_status,
+		.dsp_load     = dice_hwdep_dsp_load,
 	};
 	struct snd_hwdep *hwdep;
 	int err;

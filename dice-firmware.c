@@ -436,7 +436,7 @@ upload_err:
 #define DICE_FIRMWARE_IMG_EXEC_ADDR		0x30000
 #define DICE_FIRMWARE_IMG_ENTRY_ADDR	0x30040
 
-static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool force)
+int dice_firmware_load(struct dice* dice, struct firmware const* fw, bool force)
 {
 	int err;
 	char img_name[16] = DICE_FIRMWARE_IMG_NAME;
@@ -568,7 +568,7 @@ void dice_firmware_load_async(const struct firmware *fw, void *context)
 	}
 	_dev_info(&dice->unit->device, "firmware found (size: %i).\n",fw->size);
 
-	err = dice_fl_upload(dice, fw, false);
+	err = dice_firmware_load(dice, fw, false);
 	if (err) {
 		goto fw_done;
 	}
