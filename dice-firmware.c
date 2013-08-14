@@ -79,12 +79,12 @@
  * Sets the executable bit & waits for it to be cleared. Then reads and returns
  * the return status.
  */
-static int dice_fl_cmd_exec(struct dice* dice, unsigned int const opcode, bool req_response, unsigned int t_sleep)
+static int dice_fl_cmd_exec(struct dice* dice, unsigned int const opcode, unsigned int const t_timeout_ms, unsigned int const t_poll_ms)
 {
 	int err;
 	__be32 value;
-	u8 attempts = 10;
-
+	unsigned int attempts = 0;
+	/* write the command's opcode with the execute bit set: */
 	value = cpu_to_be32((opcode & OPCODE_MASK) | OPCODE_EXECUTE);
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
 					DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_OPCODE,
@@ -93,12 +93,14 @@ static int dice_fl_cmd_exec(struct dice* dice, unsigned int const opcode, bool r
 		dev_warn(&dice->unit->device, "FL opcode (%#x->%#llx) exec failed: %i.",opcode,DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_OPCODE,err);
 		return err;
 	}
-	if (!req_response) {
+	if ((opcode & OPCODE_MASK) == OPCODE_RESET_IMAGE) {
 		return NO_ERROR;
 	}
-	/* TODO: use some sort of wait queue instead of sleeping */
+	/* wait for the execute bit to be cleared: */
 	while(1) {
-		msleep(t_sleep);
+		if (msleep_interruptible(t_poll_ms) > 0) {
+			return -EINTR;
+		}
 		err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
 							DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_OPCODE,
 							&value, 4, 0);
@@ -109,14 +111,14 @@ static int dice_fl_cmd_exec(struct dice* dice, unsigned int const opcode, bool r
 		if ((value & cpu_to_be32(OPCODE_EXECUTE)) == 0) {
 			break;
 		}
-		if (attempts--) {
-			_dev_info(&dice->unit->device, "exec attempt %i...", attempts);
+		if (t_poll_ms*++attempts < t_timeout_ms) {
+//			_dev_info(&dice->unit->device, "exec attempt %i (%u < %u)...", attempts, t_poll_ms*attempts, t_timeout_ms);
 			continue;
 		}
-		dev_warn(&dice->unit->device, "FL opcode exec timeout.");
+		dev_warn(&dice->unit->device, "FL opcode exec timeout (%u > %u).", t_poll_ms*attempts, t_timeout_ms);
 		return -EIO;
 	}
-
+	/* read the executed command's return status: */
 	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
 					DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_RETURN_STATUS,
 					&value, 4, 0);
@@ -176,7 +178,7 @@ static int dice_fl_get_img_desc(struct dice* dice, struct dice_fl_img_desc* img_
 	if (err < 0) {
 		return err;
 	}
-	err = dice_fl_cmd_exec(dice, OPCODE_GET_IMAGE_DESC, true, 20);
+	err = dice_fl_cmd_exec(dice, OPCODE_GET_IMAGE_DESC, 10, 1);
 	if (err != NO_ERROR) {
 		return -EIO;
 	}
@@ -204,7 +206,7 @@ static int dice_fl_get_cur_img(struct dice* dice, struct dice_fl_vendor_img_info
 {
 	int err;
 
-	err = dice_fl_cmd_exec(dice, OPCODE_GET_RUNNING_IMAGE_VINFO, true, 20);
+	err = dice_fl_cmd_exec(dice, OPCODE_GET_RUNNING_IMAGE_VINFO, 10, 1);
 	if (err != NO_ERROR) {
 		return -EIO;
 	}
@@ -302,7 +304,7 @@ static int dice_fl_get_file_vinfo(struct firmware const* fw, struct dice_fl_file
 int dice_firmware_info_read(struct dice* dice)
 {
 	int err;
-	err = dice_fl_cmd_exec(dice, OPCODE_GET_APP_INFO, true, 20);
+	err = dice_fl_cmd_exec(dice, OPCODE_GET_APP_INFO, 10, 1);
 	if (err != NO_ERROR) {
 		return -EIO;
 	}
@@ -344,7 +346,9 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 	unsigned int index = 0;
 	unsigned int checksum = 0;
 	unsigned int i = 0;
-//	u8 debug_progr = 0;
+#ifdef DEBUG_DICE_FW_BIN_NAME
+	u8 debug_progr = 0;
+#endif
 
 	if (fw->size % 4 != 0) {
 		dev_err(&dice->unit->device, "firmware binary (%i) isn't zero padded", fw->size);
@@ -381,17 +385,19 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 			dev_err(&dice->unit->device, "firmware upload block (index:%#x, block_len:%#x) error", index, block_len);
 			goto upload_err;
 		}
-		err = dice_fl_cmd_exec(dice, OPCODE_UPLOAD, true, 10);
+		err = dice_fl_cmd_exec(dice, OPCODE_UPLOAD, 10, 1);
 		if (err != NO_ERROR) {
 			dev_err(&dice->unit->device, "firmware upload error (%#x)", err);
 			err = -EIO;
 			goto upload_err;
 		}
 		index += block_len;
-//		if (((100*index/fw->size) % 10 == 0) && ((100*index/fw->size) != debug_progr)) {
-//			debug_progr = (100*index/fw->size);
-//			_dev_info(&dice->unit->device, "  FW progress: %i%%", debug_progr);
-//		}
+#ifdef DEBUG_DICE_FW_BIN_NAME
+		if (((100*index/fw->size) % 10 == 0) && ((100*index/fw->size) != debug_progr)) {
+			debug_progr = (100*index/fw->size);
+			_dev_info(&dice->unit->device, "  FW progress: %i%%", debug_progr);
+		}
+#endif
 	}
 	kfree(upload_buffer);
 	values[0] = cpu_to_be32(fw->size);
@@ -402,7 +408,7 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 		dev_err(&dice->unit->device, "firmware upload stat data error");
 		return err;
 	}
-	err = dice_fl_cmd_exec(dice, OPCODE_UPLOAD_STAT, true, 50);
+	err = dice_fl_cmd_exec(dice, OPCODE_UPLOAD_STAT, 10, 1);
 	if (err != NO_ERROR) {
 		dev_err(&dice->unit->device, "firmware upload stat error (%#x)", err);
 		return -EIO;
@@ -504,7 +510,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 		dev_warn(&dice->unit->device, "delete param failed");
 		return err;
 	}
-	err = dice_fl_cmd_exec(dice, OPCODE_DELETE_IMAGE, true, 1000);
+	err = dice_fl_cmd_exec(dice, OPCODE_DELETE_IMAGE, 10000, 300);
 	if (err != NO_ERROR) {
 		dev_warn(&dice->unit->device, "delete op failed (%#x)", err);
 		if (err != E_FIS_ILLEGAL_IMAGE) {
@@ -527,7 +533,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_BLOCK_REQUEST,
 						DICE_FIRMWARE_LOAD_SPACE + FIRMWARE_DATA + 4*3,
 						img_name, sizeof(img_name), 0);
-	err = dice_fl_cmd_exec(dice, OPCODE_CREATE_IMAGE, true, 1000);
+	err = dice_fl_cmd_exec(dice, OPCODE_CREATE_IMAGE, 10000, 300);
 	if (err != NO_ERROR) {
 		dev_warn(&dice->unit->device, "create op failed (%#x)", err);
 		return -EIO;
@@ -535,7 +541,7 @@ static int dice_fl_upload(struct dice* dice, struct firmware const* fw, bool for
 
 	/* Reset device */
 	_dev_info(&dice->unit->device, "resetting device...");
-	err = dice_fl_cmd_exec(dice, OPCODE_RESET_IMAGE, false, 20);
+	err = dice_fl_cmd_exec(dice, OPCODE_RESET_IMAGE, 1, 1);
 	if (err != NO_ERROR) {
 		dev_warn(&dice->unit->device, "reset op failed (%#x)", err);
 		return -EIO;

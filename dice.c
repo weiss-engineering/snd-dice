@@ -901,7 +901,7 @@ static int __devinit dice_probe(struct device *unit_dev)
 		goto err_owner;
 
 #ifdef DEBUG_DICE_FW_BIN_NAME /* DEBUG FIRMWARE LOAD: */
-	request_firmware_nowait(THIS_MODULE,1,DEBUG_DICE_FW_BIN_NAME,unit_dev,GFP_KERNEL,dice,dice_fl_firmware_async);
+	request_firmware_nowait(THIS_MODULE,1,DEBUG_DICE_FW_BIN_NAME,unit_dev,GFP_KERNEL,dice,dice_firmware_load_async);
 #endif
 
 	/* <
