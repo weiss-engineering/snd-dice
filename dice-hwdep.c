@@ -170,7 +170,7 @@ static int dice_hwdep_dsp_load(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_ima
 	int err;
 	struct firmware fw = {
 			.size = dsp_image->length,
-			.data = vmalloc(fw.size),
+			.data = vmalloc(dsp_image->length),
 	};
 	if (!fw.data) {
 		dev_warn(&dice->unit->device, "can't allocate firmware image (%u bytes)", fw.size);
