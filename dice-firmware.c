@@ -150,6 +150,7 @@ static int dice_fl_cmd_return_read(struct dice *dice, void *buffer,
 	return 0;
 }
 
+#if 0
 struct dice_fl_img_desc {
 	char name[16];
 	unsigned int flash_base;
@@ -220,6 +221,7 @@ static int dice_fl_get_cur_img(struct dice* dice, struct dice_fl_vendor_img_info
 	_dev_info(&dice->unit->device, "  UI version: %i.%i.%i.%i", img_info->ui_vmajor, img_info->ui_vminor, img_info->user1, img_info->user2);
 	return 0;
 }
+#endif
 
 #define SDK_VERSION_MASK_MAJOR			0x1f000000
 #define SDK_VERSION_MASK_MINOR			0x00f00000
@@ -575,21 +577,4 @@ void dice_firmware_load_async(const struct firmware *fw, void *context)
 
 fw_done:
 	dice_fl_firmware_failed(dice, fw);
-}
-
-static int dice_fl_request_firmware(struct dice* dice)
-{
-	int err = 0;
-	struct firmware const* fw;
-
-#ifdef DEBUG_DICE_FW_BIN_NAME
-	err = request_firmware(&fw, DEBUG_DICE_FW_BIN_NAME, &dice->unit->device);
-	if (err < 0) {
-		dice_fl_firmware_failed(dice, fw);
-		return err;
-	}
-#endif
-
-	dice_firmware_load_async(fw, dice);
-	return err;
 }
