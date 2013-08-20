@@ -1,6 +1,9 @@
 
 #include "dice-hwdep.h"
 #include "dice-firmware.h"
+#if 1 /*debug*/
+#include "dice-avc.h"
+#endif
 
 #include <sound/core.h>
 #include <sound/firewire.h>
@@ -155,12 +158,16 @@ static int dice_hwdep_dsp_status(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_s
 {
 	struct dice *dice = hwdep->private_data;
 	unsigned int i;
+#if 1 /*debug*/
+	dice_avc_read_vendor(dice);
+#endif
 	dsp_status->num_dsps = 1;
 	dsp_status->chip_ready = 1;
 	snprintf(dsp_status->id, sizeof(dsp_status->id),"dice-%08x-%08x", dice->app_info.ui_vendor_id, dice->app_info.ui_product_id);
 	for (i=0; i<dsp_status->num_dsps && i<sizeof(dsp_status->dsp_loaded); i++) {
 		dsp_status->dsp_loaded |= BIT(i);
 	}
+
 	return 0;
 }
 

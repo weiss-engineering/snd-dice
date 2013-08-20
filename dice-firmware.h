@@ -6,7 +6,7 @@
 #include "dice.h"
 
 /* debug only: */
-//#define DEBUG_DICE_FW_BIN_NAME		"dice.bin"
+#define DEBUG_DICE_FW_BIN_NAME		"dice.bin"
 
 int dice_firmware_info_read(struct dice* dice);
 int dice_firmware_load(struct dice* dice, const struct firmware *fw, bool force);
