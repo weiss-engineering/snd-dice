@@ -42,7 +42,8 @@ struct __attribute__ ((__packed__)) avc_su_tc_vendor_cmd {
 #define	TC_VSAVC_CMD_TUNER_SCAN_MODE	4	// tuner scan mode command
 #define	TC_VSAVC_CMD_TUNER_OUTPUT		5	// tuner output command
 #define TC_VSAVC_CMD_RAW_SERIAL			10  // outputs raw serial out the host port.
-
+/* Weiss specific command ID definitions: */
+#define TC_VSAVC_CMD_WEISS_CMDS			0x100  // Weiss wdicelib:avci commands
 
 #define DEBUG_CMD_SIZE		0x2a
 #define DEBUG_RESP_SIZE		0x4c
@@ -193,6 +194,44 @@ int dice_avc_vendor_spec_cmd_fwinfo(struct dice* dice)
 	_dev_info(&dice->unit->device, "TC firmware info: attV:%#x,prT:%#x,prV:%#x,res:%#x/%#x/%#x/%#x/%#x\n",
 			tc_attrs.attributeVersion,tc_attrs.programType,tc_attrs.programVersion,
 			tc_attrs.reserved[0],tc_attrs.reserved[1],tc_attrs.reserved[2],tc_attrs.reserved[3],tc_attrs.reserved[4]);
+
+error:
+	return err;
+}
+
+int weiss_dice_avc_read(struct dice* dice)
+{
+	int err = 0;
+	u8 i;
+	// command:
+	struct avc_su_tc_vendor_cmd cmd = {
+		.cmd = {
+			.cmd = {
+				.ctype = AVC_CTYPE_STATUS,
+				.subunit_type = AVC_SU_TYPE_UNIT,
+				.subunit_id = AVC_SU_ID_IGNORE,
+				.opcode = AVC_CMD_VENDOR_DEPENDENT,
+			},
+			.vendor_id = dice->vendor,
+		},
+		.class_id = TC_VSAVC_CLASS_GENERAL,
+		.seq_id = 0xff,
+		.cmd_id = TC_VSAVC_CMD_WEISS_CMDS,
+	};
+	// operand/response vessel:
+	u32 param = 0xffffffff;
+	for (i = 0; i < sizeof(u32)/4; ++i) {
+		cpu_to_be32s(&((u32 *)&param)[i]);
+	}
+
+	err = dice_avc_vendor_spec_cmd(dice, &cmd, &param, sizeof(u32), &param, sizeof(u32));
+	if (err<0) {
+		goto error;
+	}
+	for (i = 0; i < sizeof(u32)/4; ++i) {
+		be32_to_cpus(&((u32 *)&param)[i]);
+	}
+	_dev_info(&dice->unit->device, "Weiss param status: %#x\n", param);
 
 error:
 	return err;

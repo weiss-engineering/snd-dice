@@ -159,7 +159,8 @@ static int dice_hwdep_dsp_status(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_s
 	struct dice *dice = hwdep->private_data;
 	unsigned int i;
 #if 1 /*debug*/
-	dice_avc_vendor_spec_cmd_fwinfo(dice);
+//	dice_avc_vendor_spec_cmd_fwinfo(dice);
+	weiss_dice_avc_read(dice);
 #endif
 	dsp_status->num_dsps = 1;
 	dsp_status->chip_ready = 1;
