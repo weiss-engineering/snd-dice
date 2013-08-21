@@ -7,38 +7,23 @@
 #include "dice.h"
 #include "dice-avc.h"
 
-union avc_su_cmd {
-	struct __attribute__ ((__packed__))  {
-		u8 ctype;
-		unsigned subunit_type	: 5;
-		unsigned subunit_id		: 3;
-		u8 opcode;
-	};
-	struct __attribute__ ((__packed__)) {
-		u8 bytes[3];
-	};
+struct __attribute__ ((__packed__)) avc_su_cmd {
+	u8 ctype;
+	unsigned subunit_type	: 5;
+	unsigned subunit_id		: 3;
+	u8 opcode;
 };
 
-union avc_su_vendor_cmd {
-	struct __attribute__ ((__packed__)) {
-		union avc_su_cmd cmd;
-		unsigned vendor_id		: 24;
-	};
-	struct __attribute__ ((__packed__)) {
-		u8 bytes[sizeof(union avc_su_cmd) + 3];
-	};
+struct __attribute__ ((__packed__)) avc_su_vendor_cmd {
+	const struct avc_su_cmd cmd;
+	unsigned vendor_id		: 24;
 };
 
-union avc_su_tc_vendor_cmd {
-	struct __attribute__ ((__packed__)) {
-		const union avc_su_vendor_cmd cmd;
-		u8 class_id;
-		u8 seq_id;
-		u16 cmd_id;
-	};
-	struct __attribute__ ((__packed__)) {
-		u8 bytes[sizeof(union avc_su_vendor_cmd) + 4];
-	};
+struct __attribute__ ((__packed__)) avc_su_tc_vendor_cmd {
+	const struct avc_su_vendor_cmd cmd;
+	u8 class_id;
+	u8 seq_id;
+	u16 cmd_id;
 };
 
 /* TC ELECTRONIC VENDOR SPECIFIC CALLBACK CLASS ID DEFINITIONS */
@@ -61,7 +46,7 @@ union avc_su_tc_vendor_cmd {
 
 #define DEBUG_CMD_SIZE		0x2a
 #define DEBUG_RESP_SIZE		0x4c
-int dice_avc_read_vendor(struct dice* dice)
+static int dice_avc_read_vendor(struct dice* dice)
 {
 	u8* buf_cmd;
 	int err = 0;
@@ -112,13 +97,71 @@ avc_done:
 	return err;
 }
 
-static int dice_avc_read_vendor_obsolete(struct dice* dice)
+static int dice_avc_vendor_spec_cmd(struct dice* dice, struct avc_su_tc_vendor_cmd* cmd,
+										void* operands, size_t op_size,
+										void* response, size_t resp_size)
+{
+	int err;
+	u8* buf;
+	const size_t tx_size = sizeof(struct avc_su_tc_vendor_cmd)+op_size;
+	const size_t rx_size = sizeof(struct avc_su_tc_vendor_cmd)+resp_size;
+	size_t buf_size = min_t(size_t, tx_size, rx_size);
+
+	buf = kmalloc(buf_size, GFP_KERNEL);
+	if (!buf) {
+		return -ENOMEM;
+	}
+	buf[0] = cmd->cmd.cmd.ctype;
+	buf[1] = (cmd->cmd.cmd.subunit_type<<3) | cmd->cmd.cmd.subunit_id;
+	buf[2] = cmd->cmd.cmd.opcode;
+	buf[3] = 0xff & (cmd->cmd.vendor_id>>16);
+	buf[4] = 0xff & (cmd->cmd.vendor_id>>8);
+	buf[5] = 0xff & (cmd->cmd.vendor_id);
+	buf[6] = cmd->class_id;
+	buf[7] = cmd->seq_id;
+	buf[8] = 0xff & (cmd->cmd_id>>8);
+	buf[9] = 0xff & (cmd->cmd_id);
+	if (op_size > 0) {
+		memcpy(buf+10, operands, op_size);
+	}
+
+	err = fcp_avc_transaction(dice->unit, buf, tx_size, buf, rx_size,
+				BIT(1)|BIT(2)|BIT(3)|BIT(4)|BIT(5)|BIT(6)|BIT(7)|BIT(8)|BIT(9));
+	if (err < 0) {
+		goto error;
+	}
+	if (err < rx_size) {
+		dev_err(&dice->unit->device, "short FCP response\n");
+		err = -EIO;
+		goto error;
+	}
+	if (buf[0] != AVC_RESPONSE_STABLE) {
+		dev_err(&dice->unit->device, "vendor read command failed (%#x)\n",buf[0]);
+		err = -EIO;
+	}
+	if (resp_size>0) {
+		memcpy(response, buf+rx_size-resp_size, resp_size);
+	}
+
+error:
+	kfree(buf);
+	return err;
+}
+
+struct TC_PROGRAM_ATTRIBUTES
+{
+	u32 attributeVersion;
+	u32 programType;
+	u32 programVersion;
+	u32 reserved[5];
+};
+
+int dice_avc_vendor_spec_cmd_fwinfo(struct dice* dice)
 {
 	int err = 0;
-	u8 *operands;
-	u8 *response;
 	u8 i;
-	union avc_su_tc_vendor_cmd cmd = {
+	// command:
+	struct avc_su_tc_vendor_cmd cmd = {
 		.cmd = {
 			.cmd = {
 				.ctype = AVC_CTYPE_STATUS,
@@ -132,34 +175,25 @@ static int dice_avc_read_vendor_obsolete(struct dice* dice)
 		.seq_id = 0xff,
 		.cmd_id = TC_VSAVC_CMD_PGM_IDENTIFY,
 	};
-	operands = kmalloc(4*8, GFP_KERNEL);
-	if (!operands) {
-		return -ENOMEM;
-	}
-	response = kmalloc(DEBUG_RESP_SIZE, GFP_KERNEL);
-	if (!response) {
-		kfree(operands);
-		return -ENOMEM;
-	}
-	for (i=0;i<4*8;i++) {
-		operands[i] = 0xff;
-	}
+	// operand/response vessel:
+	struct TC_PROGRAM_ATTRIBUTES tc_attrs = {
+		.attributeVersion = 0xffffffff,
+		.programType = 0xffffffff,
+		.programVersion = 0xffffffff,
+		.reserved = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff},
+	};
 
-//	err = dice_avc_tc_vendor_cmd(dice, cmd, operands, 4*8, response, DEBUG_RESP_SIZE);
+	err = dice_avc_vendor_spec_cmd(dice, &cmd, &tc_attrs, sizeof(struct TC_PROGRAM_ATTRIBUTES), &tc_attrs, sizeof(struct TC_PROGRAM_ATTRIBUTES));
 	if (err<0) {
 		goto error;
 	}
-
-	for (i=0; i<DEBUG_RESP_SIZE; i+=4) {
-		_dev_info(&dice->unit->device, "vendor res: %2i+ 0:%#04x,1:%#04x,2:%#04x,3:%#04x\n",i,
-			response[i+0],
-			response[i+1],
-			response[i+2],
-			response[i+3]
-		);
+	for (i = 0; i < sizeof(struct TC_PROGRAM_ATTRIBUTES)/4; ++i) {
+		be32_to_cpus(&((u32 *)&tc_attrs)[i]);
 	}
+	_dev_info(&dice->unit->device, "TC firmware info: attV:%#x,prT:%#x,prV:%#x,res:%#x/%#x/%#x/%#x/%#x\n",
+			tc_attrs.attributeVersion,tc_attrs.programType,tc_attrs.programVersion,
+			tc_attrs.reserved[0],tc_attrs.reserved[1],tc_attrs.reserved[2],tc_attrs.reserved[3],tc_attrs.reserved[4]);
+
 error:
-	kfree(operands);
-	kfree(response);
 	return err;
 }
