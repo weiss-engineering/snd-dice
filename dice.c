@@ -19,6 +19,7 @@
 #include "dice-pcm.h"
 #include "dice-hwdep.h"
 #include "dice-firmware.h"
+#include "dice-avc.h"
 
 MODULE_DESCRIPTION("DICE driver");
 MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de> & WEISS");
@@ -943,6 +944,12 @@ static int __devinit dice_probe(struct device *unit_dev)
 	err = dice_create_hwdep(dice);
 	if (err < 0)
 		goto err_resources;
+
+	err = dice_snd_ctl_construct(dice);
+	if (err < 0) {
+		dev_err(&dice->unit->device,"snd ctl construct error (%#x)\n", err);
+		goto err_resources;
+	}
 
 	dice_create_proc(dice);
 
