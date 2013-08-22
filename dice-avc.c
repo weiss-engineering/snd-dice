@@ -43,7 +43,7 @@ struct __attribute__ ((__packed__)) avc_su_tc_vendor_cmd {
 #define	TC_VSAVC_CMD_TUNER_OUTPUT		5	// tuner output command
 #define TC_VSAVC_CMD_RAW_SERIAL			10  // outputs raw serial out the host port.
 /* Weiss specific command ID definitions: */
-#define TC_VSAVC_CMD_WEISS_CMDS			0x100  // Weiss wdicelib:avci commands
+#define TC_VSAVC_CMD_WEISS_CMDS			0x8000  // Weiss wdicelib:avci commands
 
 #define DEBUG_CMD_SIZE		0x2a
 #define DEBUG_RESP_SIZE		0x4c
@@ -240,37 +240,47 @@ error:
  * WEISS (vendor ID: 0x001C6A) vendor specific  commands:
  */
 /**
+ * Device constitution info:
+ */
+#define WEISS_CMD_ID_DEV_CONST			0x01
+struct weiss_cmd_dev_const {		// R
+	u32 num_params;
+	u32 num_attrs;
+	u32 reserved[6];/*future use*/
+};
+/**
  * Parameter operation (read/write value)
  */
-#define WEISS_CMD_ID_PARAM_OP			0x00
+#define WEISS_CMD_ID_PARAM_OP			0x02
 struct weiss_cmd_param_op {			// R/W
 	u32 param_id;
 	u32 value;
+	u32 reserved[4];/*future use*/
 };
 /**
  * Parameter information query
  */
-#define WEISS_CMD_ID_PARAM_INFO			0x01
-# define WEISS_PTYPE_INT			0x00
-# define WEISS_PTYPE_BOOL			0x01
-# define WEISS_PTYPE_ENUM			0x02
+#define WEISS_CMD_ID_PARAM_INFO			0x03
 struct weiss_cmd_param_info {		// R
 	u32 param_id;
-	u32 type;
+	u32 type;	//snd_ctl_elem_type_t
+	u32 iface;	//snd_ctl_elem_iface_t
 	union {
 		struct {
 			u32 min;
 			u32 max;
+			u32 step;
 		} integer;
 		struct {
 			u32 items;
 		} enumerated;
 	};
+	u32 reserved[3];/*future use*/
 };
 /**
  * Enumeration type parameter item information query
  */
-#define WEISS_CMD_ID_ENUM_ITEM_INFO		0x02
+#define WEISS_CMD_ID_ENUM_ITEM_INFO		0x04
 struct weiss_cmd_enum_item_info {	// R
 	u32 param_id;
 	u32 item_id;
@@ -322,7 +332,7 @@ error:
 static int dice_sync_src_info(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_info *uinfo)
 {
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
+//	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	static char *texts[13] = {
 		"AES1","AES2","AES3","AES4","AES","ADAT","TDIF","Wordclock","ARX1","ARX2","ARX3","ARX4","Internal"
 	};
@@ -350,13 +360,11 @@ static int dice_sync_src_get(struct snd_kcontrol *kcontrol,
 static int dice_sync_src_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
-	int err;
-	u32 value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+	int err = 0;
 #if 0 /* use according method when implemented: */
+	u32 value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	err = dice_set_clock_source(dice, &value);
-#else
-	err = 0;
 #endif
 	if (err < 0)
 		return err;
