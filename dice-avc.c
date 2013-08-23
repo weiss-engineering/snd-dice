@@ -332,10 +332,11 @@ static int weiss_dice_param_info(struct dice* dice, struct weiss_cmd_param_info*
 		_dev_info(&dice->unit->device, "  items:%#x)\n",
 				param_info->enumerated.items);
 		break;
-	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
 	case SNDRV_CTL_ELEM_TYPE_INTEGER:
 		_dev_info(&dice->unit->device, "  min:%#x,max:%#x)\n",
 				param_info->integer.min, param_info->integer.max);
+		break;
+	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
 		break;
 	default:
 		dev_err(&dice->unit->device, "unsupported parameter type (%#x)\n", param_info->type);
@@ -468,6 +469,47 @@ static int dice_level_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
+struct dice_weiss_snd_ctl_private_data {
+	struct dice* dice;
+	struct weiss_cmd_param_info param_info;
+};
+
+static int dice_weiss_param_enum_info(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_info *uinfo)
+{
+	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+	uinfo->count = 1;
+	uinfo->value.enumerated.items = private_data->param_info.enumerated.items;
+	return 0;
+}
+static int dice_weiss_param_int_info(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_info *uinfo)
+{
+	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = private_data->param_info.integer.min;
+	uinfo->value.integer.max = private_data->param_info.integer.max;
+	uinfo->value.integer.step = private_data->param_info.integer.step;
+	return 0;
+}
+static int dice_weiss_param_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_op param = {
+		.param_id = private_data->param_info.param_id,
+	};
+	_dev_info(&private_data->dice->unit->device,"read level value...\n");
+	err = weiss_dice_read_param(private_data->dice, &param);
+	if (err < 0)
+		return err;
+	ucontrol->value.enumerated.item[0] = param.value;
+	return 0;
+}
+
 /**
  * Weiss specific method for populating its products'
  * snd_ctl's (via custom vendor dependent AV/C commands).
@@ -479,14 +521,12 @@ static int dice_weiss_snd_ctl_construct(struct dice* dice)
 	struct weiss_cmd_dev_const dev_const;
 	struct weiss_cmd_param_info param_info;
 	struct weiss_cmd_enum_item_info enum_info;
-	struct snd_kcontrol_new control;
 	err = weiss_dice_dev_const(dice, &dev_const);
 	if (err < 0)
 		return err;
 
-	return 0;// TODO: create controls
-
 	for (i=0; i<dev_const.num_params; ++i) {
+		param_info.param_id = i;
 		err = weiss_dice_param_info(dice, &param_info);
 		if (err < 0)
 			continue;
@@ -495,18 +535,60 @@ static int dice_weiss_snd_ctl_construct(struct dice* dice)
 			continue;
 		}
 		switch (param_info.type) {
-		case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
-
-			for (j=0; j<param_info.enumerated.items; ++j) {
-				err = weiss_dice_enum_item_info(dice, &enum_info);
-				if (err < 0) {
-					break;
+		case SNDRV_CTL_ELEM_TYPE_ENUMERATED: {
+				struct snd_kcontrol_new control = {
+					.iface = param_info.iface,
+					.name = param_info.name,
+					.info = dice_weiss_param_enum_info,
+				};
+				struct dice_weiss_snd_ctl_private_data private_data = {
+					.dice = dice,
+					.param_info = param_info,
+				};
+//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
+				if (err < 0)
+					return err;
+				for (j=0; j<param_info.enumerated.items; ++j) {
+					enum_info.param_id = i;
+					enum_info.item_id = j;
+					err = weiss_dice_enum_item_info(dice, &enum_info);
+					if (err < 0) {
+						break;
+					}
 				}
 			}
 			break;
-		case SNDRV_CTL_ELEM_TYPE_INTEGER:
+		case SNDRV_CTL_ELEM_TYPE_INTEGER: {
+				struct snd_kcontrol_new control = {
+					.iface = param_info.iface,
+					.name = param_info.name,
+					.info = dice_weiss_param_int_info,
+					.get = dice_weiss_param_get,
+				};
+				struct dice_weiss_snd_ctl_private_data private_data = {
+					.dice = dice,
+					.param_info = param_info,
+				};
+//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
+				if (err < 0)
+					return err;
+			}
 			break;
-		case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+		case SNDRV_CTL_ELEM_TYPE_BOOLEAN: {
+				struct snd_kcontrol_new control = {
+					.iface = param_info.iface,
+					.name = param_info.name,
+					.info = snd_ctl_boolean_mono_info,
+					.get = dice_weiss_param_get,
+				};
+				struct dice_weiss_snd_ctl_private_data private_data = {
+					.dice = dice,
+					.param_info = param_info,
+				};
+//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
+				if (err < 0)
+					return err;
+			}
 			break;
 		default:
 			dev_err(&dice->unit->device,"unsupported param type (%#x)\n", param_info.type);
