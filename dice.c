@@ -16,13 +16,17 @@
 #include <sound/core.h>
 #include <sound/info.h>
 #include "../lib.h"
-#include "dice-pcm.h"
-#include "dice-hwdep.h"
-#include "dice-firmware.h"
-#include "dice-avc.h"
+#include "pcm.h"
+#include "hwdep.h"
+#include "firmware.h"
+#include "avc.h"
+#include "stream.h"
+#include "notif.h"
 
 MODULE_DESCRIPTION("DICE driver");
-MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de> & WEISS");
+MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de>, "
+              "Rolf Anderegg <rolf.anderegg@weiss.ch> and "
+              "Uli Franke <uli.franke@weiss.ch>");
 MODULE_LICENSE("GPL v2");
 
 const unsigned int dice_rates[DICE_NUM_RATES] = {
@@ -47,11 +51,6 @@ unsigned int dice_rate_to_index(unsigned int rate)
 			return i;
 
 	return 0;
-}
-
-unsigned int dice_rate_index_to_mode(unsigned int rate_index)
-{
-	return ((int)rate_index - 1) / 2;
 }
 
 void dice_lock_changed(struct dice *dice)
@@ -205,6 +204,24 @@ static void dice_owner_clear(struct dice *dice)
 	dice->owner_generation = -1;
 }
 
+static int dice_read_mem_quadlets(struct dice *dice, void *buffer,
+			      unsigned int offset_q, unsigned int quadlets)
+{
+	unsigned int i;
+	int err;
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
+				 DICE_PRIVATE_SPACE + 4 * offset_q,
+				 buffer, 4 * quadlets, 0);
+	if (err < 0)
+		return err;
+
+	for (i = 0; i < quadlets; ++i)
+		be32_to_cpus(&((u32 *)buffer)[i]);
+
+	return 0;
+}
+
 int dice_ctrl_enable_set(struct dice *dice)
 {
 	__be32 value;
@@ -239,14 +256,35 @@ void dice_ctrl_enable_clear(struct dice *dice)
 	dice->global_enabled = false;
 }
 
-int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate)
+int dice_ctrl_get_global_clock_select(struct dice *dice, u32 *clock)
+{
+	int err;
+	__be32 clock_sel;
+
+	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
+				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
+				 &clock_sel, 4, 0);
+	if (err == 0) {
+		*clock = be32_to_cpu(clock_sel);
+	}
+	return err;
+}
+
+static int dice_set_global_clock_select_wait(struct dice *dice, u32 clock_sel)
 {
 	__be32 value;
+	u32 read_back;
 	int err;
+
+	if (dice_stream_is_any_running(dice)) {
+		dev_err(&dice->unit->device, "clock setup can not be changed while streams are running.\n");
+		/* TODO: Correct error value? */
+		return -EPERM;
+	}
 
 	INIT_COMPLETION(dice->clock_accepted);
 
-	value = cpu_to_be32(clock_rate | CLOCK_SOURCE_ARX1);
+	value = cpu_to_be32(clock_sel);
 	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
 				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
 				 &value, 4, 0);
@@ -254,58 +292,112 @@ int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate)
 		return err;
 
 	if (!wait_for_completion_timeout(&dice->clock_accepted,
-					 msecs_to_jiffies(100)))
-		dev_warn(&dice->unit->device, "clock change timed out\n");
+					 msecs_to_jiffies(5000))) {
+		err = dice_ctrl_get_global_clock_select (dice, &read_back);
+		if (err < 0) {
+			dev_warn(&dice->unit->device, "clock change timed out and read back failed\n");
+			/* return error ? */
+			return -EIO;
+		} else {
+			if (clock_sel != read_back) {
+				dev_warn(&dice->unit->device, "clock change timed out and read back differs\n");
+				return -EIO;
+			} else {
+				dev_warn(&dice->unit->device, "clock change timed out but read back ok\n");
+			}
+		}
+	}
 
 	return 0;
 }
 
-static void dice_fw_notification(struct fw_card *card, struct fw_request *request,
-			      int tcode, int destination, int source,
-			      int generation, unsigned long long offset,
-			      void *data, size_t length, void *callback_data)
+int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate, bool force)
 {
-	struct dice *dice = callback_data;
-	u32 bits;
-	unsigned long flags;
-
-	if (tcode != TCODE_WRITE_QUADLET_REQUEST) {
-		fw_send_response(card, request, RCODE_TYPE_ERROR);
-		return;
-	}
-	if ((offset & 3) != 0) {
-		fw_send_response(card, request, RCODE_ADDRESS_ERROR);
-		return;
-	}
-
-	bits = be32_to_cpup(data);
-
-	spin_lock_irqsave(&dice->lock, flags);
-	dice->notification_bits |= bits;
-	spin_unlock_irqrestore(&dice->lock, flags);
-
-	fw_send_response(card, request, RCODE_COMPLETE);
-
-	if (bits & NOTIFY_CLOCK_ACCEPTED)
-		complete(&dice->clock_accepted);
-	wake_up(&dice->hwdep_wait);
-}
-
-
-static int dice_proc_read_mem(struct dice *dice, void *buffer,
-			      unsigned int offset_q, unsigned int quadlets)
-{
-	unsigned int i;
+	u32 global_clock_sel;
 	int err;
 
-	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
-				 DICE_PRIVATE_SPACE + 4 * offset_q,
-				 buffer, 4 * quadlets, 0);
+	/* TODO: Use the local cached value at dice->global_settings.clock_select ? */
+	err = dice_ctrl_get_global_clock_select(dice, &global_clock_sel);
 	if (err < 0)
 		return err;
 
-	for (i = 0; i < quadlets; ++i)
-		be32_to_cpus(&((u32 *)buffer)[i]);
+#if 1
+	/* If the global clock select is already set to this value no notification
+	 * will be generated and the heavy time will hit in but we need the timeout
+	 * because certain devices are slow in setting the clock. */
+	if (!force && (global_clock_sel & CLOCK_RATE_MASK) == clock_rate) {
+		dev_notice(&dice->unit->device, "clock rate already set to 0x%x\n", clock_rate);
+		return 0;
+	}
+#endif
+
+	global_clock_sel &= ~CLOCK_RATE_MASK;
+	global_clock_sel |= clock_rate;
+
+	return dice_set_global_clock_select_wait(dice, global_clock_sel);
+}
+
+int dice_ctrl_set_clock_source(struct dice *dice, u32 clock_source, bool force)
+{
+	int err;
+	u32 global_clock_sel;
+
+	/* TODO: Use the local cached value at dice->global_settings.clock_select ? */
+	err = dice_ctrl_get_global_clock_select(dice, &global_clock_sel);
+	if (err < 0)
+		return err;
+
+#if 1
+	/* If the global clock select is already set to this value no notification
+	 * will be generated and the heavy time will hit in but we need the timeout
+	 * because certain devices are slow in setting the clock. */
+	if (!force && (global_clock_sel & CLOCK_SOURCE_MASK) == clock_source) {
+		dev_notice(&dice->unit->device, "clock source already set to 0x%x\n", clock_source);
+		return 0;
+	}
+#endif
+
+	global_clock_sel &= ~CLOCK_SOURCE_MASK;
+	global_clock_sel |= clock_source;
+
+	return dice_set_global_clock_select_wait(dice, global_clock_sel);
+}
+
+int dice_ctrl_get_ext_sync_info(struct dice *dice, struct dice_ext_sync_info *sync_info)
+{
+	int err;
+
+	err = dice_read_mem_quadlets(dice,
+	                             sync_info,
+	                             dice->ext_sync_offset/4,
+	                             sizeof(*sync_info)/4);
+	if (err < 0)
+		return err;
+
+	return 0;
+}
+
+int dice_ctrl_get_global_settings(struct dice *dice, struct dice_global_settings *settings)
+{
+	int err;
+
+	/* TODO: limit read when clock_caps and clock_names are not supported by driver... */
+
+	err = dice_read_mem_quadlets(dice,
+	                             settings,
+	                             dice->global_offset/4,
+	                             min(sizeof(*settings), dice->global_size)/4);
+	if (err < 0)
+		return err;
+
+	if (dice->global_size < GLOBAL_CLOCK_CAPABILITIES + 4) {
+		settings->clock_caps = CLOCK_CAP_RATE_44100 |
+						   CLOCK_CAP_RATE_48000 |
+						   /* CLOCK_CAP_SOURCE_ARX1 | not necessarily supported! */
+						   CLOCK_CAP_SOURCE_INTERNAL;
+	} else if (dice->global_size < GLOBAL_CLOCK_SOURCE_NAMES + CLOCK_SOURCE_NAMES_SIZE) {
+		memset(&settings->clock_source_names, 0, sizeof(settings->clock_source_names));
+	}
 
 	return 0;
 }
@@ -398,7 +490,7 @@ static void dice_proc_read(struct snd_info_entry *entry,
 	} buf;
 	unsigned int quadlets, stream, i;
 
-	if (dice_proc_read_mem(dice, sections, 0, ARRAY_SIZE(sections)) < 0)
+	if (dice_read_mem_quadlets(dice, sections, 0, ARRAY_SIZE(sections)) < 0)
 		return;
 	snd_iprintf(buffer, "sections:\n");
 	for (i = 0; i < ARRAY_SIZE(section_names); ++i)
@@ -407,7 +499,7 @@ static void dice_proc_read(struct snd_info_entry *entry,
 			    sections[i * 2], sections[i * 2 + 1]);
 
 	quadlets = min_t(u32, sections[1], sizeof(buf.global) / 4);
-	if (dice_proc_read_mem(dice, &buf.global, sections[0], quadlets) < 0)
+	if (dice_read_mem_quadlets(dice, &buf.global, sections[0], quadlets) < 0)
 		return;
 	snd_iprintf(buffer, "global:\n");
 	snd_iprintf(buffer, "  owner: %04x:%04x%08x\n",
@@ -451,11 +543,11 @@ static void dice_proc_read(struct snd_info_entry *entry,
 			    buf.global.clock_source_names);
 	}
 
-	if (dice_proc_read_mem(dice, &tx_rx_header, sections[2], 2) < 0)
+	if (dice_read_mem_quadlets(dice, &tx_rx_header, sections[2], 2) < 0)
 		return;
 	quadlets = min_t(u32, tx_rx_header.size, sizeof(buf.tx));
 	for (stream = 0; stream < tx_rx_header.number; ++stream) {
-		if (dice_proc_read_mem(dice, &buf.tx, sections[2] + 2 +
+		if (dice_read_mem_quadlets(dice, &buf.tx, sections[2] + 2 +
 				       stream * tx_rx_header.size,
 				       quadlets) < 0)
 			break;
@@ -477,11 +569,11 @@ static void dice_proc_read(struct snd_info_entry *entry,
 		}
 	}
 
-	if (dice_proc_read_mem(dice, &tx_rx_header, sections[4], 2) < 0)
+	if (dice_read_mem_quadlets(dice, &tx_rx_header, sections[4], 2) < 0)
 		return;
 	quadlets = min_t(u32, tx_rx_header.size, sizeof(buf.rx));
 	for (stream = 0; stream < tx_rx_header.number; ++stream) {
-		if (dice_proc_read_mem(dice, &buf.rx, sections[4] + 2 +
+		if (dice_read_mem_quadlets(dice, &buf.rx, sections[4] + 2 +
 				       stream * tx_rx_header.size,
 				       quadlets) < 0)
 			break;
@@ -505,7 +597,7 @@ static void dice_proc_read(struct snd_info_entry *entry,
 
 	quadlets = min_t(u32, sections[7], sizeof(buf.ext_sync) / 4);
 	if (quadlets >= 4) {
-		if (dice_proc_read_mem(dice, &buf.ext_sync,
+		if (dice_read_mem_quadlets(dice, &buf.ext_sync,
 				       sections[6], 4) < 0)
 			return;
 		snd_iprintf(buffer, "ext status:\n");
@@ -535,21 +627,20 @@ static void dice_create_proc(struct dice *dice)
 		snd_info_set_text_ops(entry, dice, dice_proc_read);
 }
 
-static void dice_card_free(struct snd_card *card)
+
+static void dice_snd_card_free_callback(struct snd_card *card)
 {
 	struct dice *dice = card->private_data;
 
-	dice_destroy_streaming(dice);
+	dice_stream_destroy(dice);
+
 	fw_core_remove_address_handler(&dice->fw_notification_handler);
+	flush_workqueue(dice->notif_queue);
+	destroy_workqueue(dice->notif_queue);
+
 	fw_unit_put(dice->unit);
 	mutex_destroy(&dice->mutex);
 }
-
-#define OUI_MAUDIO		0x000d6c
-#define OUI_WEISS		0x001c6a
-
-#define DICE_CATEGORY_ID	0x04
-#define WEISS_CATEGORY_ID	0x00
 
 static int __devinit dice_interface_check(struct fw_unit *unit)
 {
@@ -627,109 +718,11 @@ static int __devinit dice_interface_check(struct fw_unit *unit)
 	return vendor;
 }
 
-static int __devinit highest_supported_mode_rate(struct dice *dice,
-						 unsigned int mode)
-{
-	int i;
-
-	for (i = ARRAY_SIZE(dice_rates) - 1; i >= 0; --i)
-		if ((dice->clock_caps & (1 << i)) &&
-		    dice_rate_index_to_mode(i) == mode)
-			return i;
-
-	return -1;
-}
-
-static int __devinit dice_read_mode_params(struct dice *dice,
-                                           unsigned int mode,
-                                           enum dice_direction direction)
-{
-	__be32 values[2];
-	int rate_index, err;
-	unsigned int i;
-	struct audio_layout* layout;
-	const char* rtx;
-
-	layout = direction == DICE_DIRECTION_RX ? &dice->rx : &dice->tx;
-	rtx = direction == DICE_DIRECTION_RX ? "r" : "t";
-
-	rate_index = highest_supported_mode_rate(dice, mode);
-	if (rate_index < 0) {
-		layout->count[mode] = 0;
-		layout->channels[mode] = 0;
-		return 0;
-	}
-
-	/* Why do we set the sample rate here? */
-	err = dice_ctrl_change_rate(dice, rate_index << CLOCK_RATE_SHIFT);
-	if (err < 0)
-		return err;
-
-	if (direction == DICE_DIRECTION_RX) {
-		err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
-					 dice_rx_address(dice, 0, RX_NUMBER),
-					 values, 4, 0);
-	} else {
-		err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
-					 dice_tx_address(dice, 0, TX_NUMBER),
-					 values, 4, 0);
-	}
-	if (err < 0)
-		return err;
-	layout->count[mode] = be32_to_cpu(values[0]);
-	if (layout->count[mode] > DICE_MAX_FW_ISOC_CH) {
-		dev_err(&dice->unit->device, "#%sx(%u) = %u: too large\n",
-		        rtx, mode, layout->count[mode]);
-		return -ENXIO;
-	}
-
-	layout->channels[mode] = 0;
-	for (i = 0; i < layout->count[mode]; ++i) {
-		if (direction == DICE_DIRECTION_RX) {
-			err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
-						 dice_rx_address(dice, i, RX_NUMBER_AUDIO),
-						 values, 2 * 4, 0);
-		} else {
-			err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
-									 dice_tx_address(dice, i, TX_NUMBER_AUDIO),
-									 values, 2 * 4, 0);
-		}
-		if (err < 0)
-			return err;
-		layout->isoc_layout[i].pcm_channels[mode] = be32_to_cpu(values[0]);
-		layout->isoc_layout[i].midi_ports[mode]   = be32_to_cpu(values[1]);
-		if (layout->isoc_layout[i].pcm_channels[mode] > (mode < 2 ? 16 : 8) &&
-		    (dice->vendor != OUI_MAUDIO || i > 0)) {
-			dev_err(&dice->unit->device,
-				"%sx%u(%u): #PCM = %u: too large\n",
-				rtx, i, mode, layout->isoc_layout[i].pcm_channels[mode]);
-			return -ENXIO;
-		}
-		if (layout->isoc_layout[i].midi_ports[mode] > 8) {
-			dev_err(&dice->unit->device,
-				"%sx%u(%u): #MIDI = %u: too large\n",
-				rtx, i, mode, layout->isoc_layout[i].midi_ports[mode]);
-			return -ENXIO;
-		}
-
-		layout->channels[mode] += layout->isoc_layout[i].pcm_channels[mode];
-	}
-
-	if (dice->vendor == OUI_MAUDIO && layout->count[mode] > 1) {
-		if (layout->isoc_layout[0].pcm_channels[mode] <= (mode < 2 ? 16 : 8))
-			layout->isoc_layout[0].pcm_channels[mode] =
-						layout->channels[mode];
-		layout->count[mode] = 1;
-	}
-
-	return 0;
-}
-
 static int __devinit dice_read_params(struct dice *dice)
 {
-	__be32 pointers[6];
+	__be32 pointers[8];
 	__be32 value;
-	int mode, err;
+	int /*mode, */err;
 
 	err = snd_fw_transaction(dice->unit, TCODE_READ_BLOCK_REQUEST,
 				 DICE_PRIVATE_SPACE,
@@ -737,8 +730,10 @@ static int __devinit dice_read_params(struct dice *dice)
 	if (err < 0)
 		return err;
 	dice->global_offset = be32_to_cpu(pointers[0]) * 4;
+	dice->global_size = be32_to_cpu(pointers[1]) * 4;
 	dice->tx_offset = be32_to_cpu(pointers[2]) * 4;
 	dice->rx_offset = be32_to_cpu(pointers[4]) * 4;
+	dice->ext_sync_offset = be32_to_cpu(pointers[6]) * 4;
 
 	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
 				 dice_tx_address(dice, 0, TX_SIZE),
@@ -754,31 +749,22 @@ static int __devinit dice_read_params(struct dice *dice)
 		return err;
 	dice->rx_size = be32_to_cpu(value) * 4;
 
-	/* some very old firmwares don't tell about their clock support */
-	if (be32_to_cpu(pointers[1]) * 4 >= GLOBAL_CLOCK_CAPABILITIES + 4) {
-		err = snd_fw_transaction(
-				dice->unit, TCODE_READ_QUADLET_REQUEST,
-				dice_global_address(dice, GLOBAL_CLOCK_CAPABILITIES),
-				&value, 4, 0);
-		if (err < 0)
-			return err;
-		dice->clock_caps = be32_to_cpu(value);
-	} else {
-		/* this should be supported by any device */
-		dice->clock_caps = CLOCK_CAP_RATE_44100 |
-				   CLOCK_CAP_RATE_48000 |
-				   CLOCK_CAP_SOURCE_ARX1 |
-				   CLOCK_CAP_SOURCE_INTERNAL;
-	}
+	err = dice_ctrl_get_global_settings(dice, &dice->global_settings);
+	if (err < 0)
+		return err;
 
-	for (mode = 2; mode >= 0; --mode) {
-		err = dice_read_mode_params(dice, mode, DICE_DIRECTION_RX);
-		if (err < 0)
-			return err;
-		err = dice_read_mode_params(dice, mode, DICE_DIRECTION_TX);
-		if (err < 0)
-			return err;
-	}
+	err = dice_ctrl_get_ext_sync_info(dice, &dice->extended_sync_info);
+	if (err < 0)
+		return err;
+
+	/* Fetch initial isochronous stream configuration of device. All subsequent
+	 * configuration changes will be tracked through device notifications. */
+	err = dice_stream_update_config(dice, &dice->playback);
+	if (err < 0)
+		return err;
+	err = dice_stream_update_config(dice, &dice->capture);
+	if (err < 0)
+		return err;
 
 	return 0;
 }
@@ -818,43 +804,6 @@ static void __devinit dice_card_strings(struct dice *dice)
 	strcpy(card->mixername, "DICE");
 }
 
-int dice_ctrl_get_clock(struct dice *dice, u32 *clock)
-{
-	int err;
-	__be32 clock_sel;
-
-	err = snd_fw_transaction(dice->unit, TCODE_READ_QUADLET_REQUEST,
-				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
-				 &clock_sel, 4, 0);
-	if (err == 0) {
-		*clock = be32_to_cpu(clock_sel);
-	}
-	return err;
-}
-
-/* Does not stop streaming. Use dice_ctrl_change_clock_source to do that
- * outside init.
- */
-static int dice_set_clock_source(struct dice *dice, u32 clock_source)
-{
-	int err;
-	u32 clock_sel;
-	__be32 clock_sel_be32;
-
-	err = dice_ctrl_get_clock(dice, &clock_sel);
-	if (err < 0)
-		return err;
-
-	clock_sel &= ~CLOCK_SOURCE_MASK;
-	clock_sel |= CLOCK_SOURCE_ARX1;
-	clock_sel_be32 = cpu_to_be32(clock_sel);
-
-	err = snd_fw_transaction(dice->unit, TCODE_WRITE_QUADLET_REQUEST,
-				 dice_global_address(dice, GLOBAL_CLOCK_SELECT),
-				 &clock_sel, 4, 0);
-	return err;
-}
-
 static int __devinit dice_probe(struct device *unit_dev)
 {
 	struct fw_unit *unit = fw_unit(unit_dev);
@@ -880,9 +829,16 @@ static int __devinit dice_probe(struct device *unit_dev)
 	init_completion(&dice->clock_accepted);
 	init_waitqueue_head(&dice->hwdep_wait);
 	dice->vendor = vendor;
+	dice->pcm = NULL;
 
+	dice->notif_queue = create_singlethread_workqueue("dice_notif_queue");
+	if (!dice->notif_queue) {
+		dev_err(&unit->device, "Failed to create notification work queue");
+		err = -ENOMEM;
+		goto err_unit;
+	}
 	dice->fw_notification_handler.length = 4;
-	dice->fw_notification_handler.address_callback = dice_fw_notification;
+	dice->fw_notification_handler.address_callback = dice_fw_notification_callback;
 	dice->fw_notification_handler.callback_data = dice;
 	err = fw_core_add_address_handler(&dice->fw_notification_handler,
 					  &fw_high_memory_region);
@@ -901,68 +857,57 @@ static int __devinit dice_probe(struct device *unit_dev)
 	if (err < 0)
 		goto err_owner;
 
-#ifdef DEBUG_DICE_FW_BIN_NAME /* DEBUG FIRMWARE LOAD: */
-	request_firmware_nowait(THIS_MODULE,1,DEBUG_DICE_FW_BIN_NAME,unit_dev,GFP_KERNEL,dice,dice_firmware_load_async);
-#endif
-
-	/* <
-	 * TODO: We should move all fw iso resource management and amdtp stream
-	 * management to pcm as well -> write dice_pcm_destroy and inject it into
-	 * suitable places
-	 */
-	err = fw_iso_resources_init(&dice->pcm.playback.resources, unit);
-	if (err < 0)
-		goto err_owner;
-	dice->pcm.playback.resources.channels_mask = 0x00000000ffffffffuLL;
-
 	if (vendor != OUI_MAUDIO) {
 		cip_flags = CIP_BLOCKING | CIP_HI_DUALWIRE;
 	} else {
 		cip_flags = CIP_BLOCKING;
 	}
-	err = amdtp_stream_init(&dice->pcm.playback.stream, unit, AMDTP_OUT_STREAM, cip_flags);
-	if (err < 0)
-		goto err_resources;
-	/* > */
+	err = dice_stream_init(dice, cip_flags);
+	if (err < 0) {
+		goto err_owner;
+	}
 
-	card->private_free = dice_card_free;
+	card->private_free = dice_snd_card_free_callback;
 
 	dice_card_strings(dice);
 
-	/* TODO: We should not set the clock source here but initialize the
-	 * streaming based on the current clock source configuration, i.e.
-	 * master when ARXn, slave on others.
+#if 1
+	/* Remove this block as soon as #943 has been closed.
+	 *
+	 * Puts device into well known state. Firmware doesn't seem to update the
+	 * global clock select after driver re-attach. Bug in Weiss firmware...
 	 */
-	err = dice_set_clock_source (dice, CLOCK_SOURCE_ARX1);
+	dice_ctrl_set_clock_source(dice, CLOCK_SOURCE_INTERNAL, true);
+	dice_ctrl_change_rate(dice, CLOCK_RATE_44100, true);
+#endif
+
 	if (err < 0)
-		goto err_resources;
+		goto err_stream;
 
 	err = dice_pcm_create(dice);
 	if (err < 0)
-		goto err_resources;
+		goto err_stream;
 
 	err = dice_create_hwdep(dice);
 	if (err < 0)
-		goto err_resources;
+		goto err_stream;
 
 	err = dice_snd_ctl_construct(dice);
-	if (err < 0) {
-		dev_err(&dice->unit->device,"snd ctl construct error (%#x)\n", err);
-		goto err_resources;
-	}
+	if (err < 0)
+		goto err_stream;
 
 	dice_create_proc(dice);
 
 	err = snd_card_register(card);
 	if (err < 0)
-		goto err_resources;
+		goto err_stream;
 
 	dev_set_drvdata(unit_dev, dice);
 
 	return 0;
 
-err_resources:
-	fw_iso_resources_destroy(&dice->pcm.playback.resources);
+err_stream:
+	dice_stream_destroy(dice);
 err_owner:
 	dice_owner_clear(dice);
 err_notification_handler:
@@ -970,7 +915,7 @@ err_notification_handler:
 err_unit:
 	fw_unit_put(dice->unit);
 	mutex_destroy(&dice->mutex);
-/*error:*/
+
 	snd_card_free(card);
 	return err;
 }
@@ -979,13 +924,13 @@ static int __devexit dice_remove(struct device *dev)
 {
 	struct dice *dice = dev_get_drvdata(dev);
 
-	dice_abort_streaming(dice);
+	dice_stream_pcm_abort(dice);
 
 	snd_card_disconnect(dice->card);
 
 	mutex_lock(&dice->mutex);
 
-	dice_stop_streaming(dice);
+	dice_stream_stop_all(dice);
 	dice_owner_clear(dice);
 
 	mutex_unlock(&dice->mutex);
@@ -995,7 +940,7 @@ static int __devexit dice_remove(struct device *dev)
 	return 0;
 }
 
-static void dice_bus_reset(struct fw_unit *unit)
+static void dice_fw_bus_reset_callback(struct fw_unit *unit)
 {
 	struct dice *dice = dev_get_drvdata(&unit->device);
 
@@ -1007,16 +952,17 @@ static void dice_bus_reset(struct fw_unit *unit)
 	 * to stop so that the application can restart them in an orderly
 	 * manner.
 	 */
-	dice_abort_streaming(dice);
+	dice_stream_pcm_abort(dice);
 
 	mutex_lock(&dice->mutex);
 
 	dice->global_enabled = false;
-	dice_stop_packet_streaming(dice);
+
+	dice_stream_stop_on_bus_reset(dice);
 
 	dice_owner_update(dice);
 
-	fw_iso_resources_update(&dice->pcm.playback.resources);
+	dice_stream_update_on_bus_reset(dice);
 
 	mutex_unlock(&dice->mutex);
 }
@@ -1046,7 +992,7 @@ static struct fw_driver dice_driver = {
 		.probe	= dice_probe,
 		.remove	= __devexit_p(dice_remove),
 	},
-	.update   = dice_bus_reset,
+	.update   = dice_fw_bus_reset_callback,
 	.id_table = dice_id_table,
 };
 

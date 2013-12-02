@@ -64,13 +64,17 @@
 /* Some registers in the Rx/Tx sections may have changed. */
 #define  NOTIFY_RX_CFG_CHG		0x00000001
 #define  NOTIFY_TX_CFG_CHG		0x00000002
+#define  NOTIFY_DUP_ISOC_BIT  0x00000004
+#define  NOTIFY_BW_ERR_BIT  0x00000008
 /* Lock status of the current clock source may have changed. */
 #define  NOTIFY_LOCK_CHG		0x00000010
 /* Write to the clock select register has been finished. */
 #define  NOTIFY_CLOCK_ACCEPTED		0x00000020
-/* Lock status of some clock source has changed. */
-#define  NOTIFY_EXT_STATUS		0x00000040
+/* (Lock status of some clock source has changed.)
+ * TODO: Determine exact background! */
+#define  NOTIFY_INTERFACE_CHG		0x00000040
 /* Other bits may be used for device-specific events. */
+
 
 /*
  * A name that can be customized for each device; read/write.  Padded with zero

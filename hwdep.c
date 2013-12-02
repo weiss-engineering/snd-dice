@@ -1,9 +1,6 @@
 
-#include "dice-hwdep.h"
-#include "dice-firmware.h"
-#if 1 /*debug*/
-#include "dice-avc.h"
-#endif
+#include "hwdep.h"
+#include "firmware.h"
 
 #include <sound/core.h>
 #include <sound/firewire.h>
@@ -160,6 +157,7 @@ static int dice_hwdep_dsp_status(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_s
 	unsigned int i;
 	dsp_status->num_dsps = 1;
 	dsp_status->chip_ready = 1;
+	dsp_status->version = dice->app_info.ui_application_version;
 	snprintf(dsp_status->id, sizeof(dsp_status->id),"dice-%08x-%08x", dice->app_info.ui_vendor_id, dice->app_info.ui_product_id);
 	for (i=0; i<dsp_status->num_dsps && i<sizeof(dsp_status->dsp_loaded); i++) {
 		dsp_status->dsp_loaded |= BIT(i);
@@ -184,7 +182,8 @@ static int dice_hwdep_dsp_load(struct snd_hwdep *hwdep, struct snd_hwdep_dsp_ima
 		err = -EFAULT;
 		goto fw_load_done;
 	}
-	err = dice_firmware_load(dice, &fw, (dsp_image->driver_data & DICE_HWDEP_LOADDSP_DRV_FLAG_FORCE)!=0);
+	// NOTICE: forced load (check dsp_status compatibility within user space):
+	err = dice_firmware_load(dice, &fw, true);
 
 fw_load_done:
 	vfree(fw.data);

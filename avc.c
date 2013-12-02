@@ -6,7 +6,7 @@
 #include "../fcp.h"
 #include "../avc.h"
 #include "dice.h"
-#include "dice-avc.h"
+#include "avc.h"
 
 struct __attribute__ ((__packed__)) avc_su_cmd {
 	u8 ctype;
@@ -46,9 +46,8 @@ static int dice_avc_vendor_spec_cmd(struct dice* dice, struct avc_su_tc_vendor_c
 	u8* buf;
 	const size_t tx_size = sizeof(struct avc_su_tc_vendor_cmd)+op_size;
 	const size_t rx_size = sizeof(struct avc_su_tc_vendor_cmd)+resp_size;
-	size_t buf_size = min_t(size_t, tx_size, rx_size);
+	size_t buf_size = max_t(size_t, tx_size, rx_size);
 
-	_dev_info(&dice->unit->device, "transmitting AVC cmd...\n");
 	buf = kmalloc(buf_size, GFP_KERNEL);
 	if (!buf) {
 		return -ENOMEM;
@@ -63,12 +62,13 @@ static int dice_avc_vendor_spec_cmd(struct dice* dice, struct avc_su_tc_vendor_c
 	buf[7] = 0xff; //cmd->seq_id
 	buf[8] = 0xff & (cmd->cmd_id>>8);
 	buf[9] = 0xff & (cmd->cmd_id);
-	if (op_size > 0) {
-		memcpy(buf+10, operands, op_size);
+	if (operands && op_size > 0) {
+		memcpy(&buf[sizeof(struct avc_su_tc_vendor_cmd)], operands, op_size);
 	}
 
 	err = fcp_avc_transaction(dice->unit, buf, tx_size, buf, rx_size,
-				BIT(1)|BIT(2)|BIT(3)|BIT(4)|BIT(5)|BIT(6)|BIT(7)|BIT(8)|BIT(9)|(resp_match_bytes<<9));
+				BIT(1)|BIT(2)|BIT(3)|BIT(4)|BIT(5)|BIT(6)|BIT(7)|BIT(8)|BIT(9)|
+							(resp_match_bytes<<(sizeof(struct avc_su_tc_vendor_cmd)-1)));
 	if (err < 0) {
 		dev_err(&dice->unit->device, "AVC transaction failed (%i).\n",err);
 		goto error;
@@ -82,8 +82,8 @@ static int dice_avc_vendor_spec_cmd(struct dice* dice, struct avc_su_tc_vendor_c
 		dev_err(&dice->unit->device, "vendor read command failed (%#x)\n",buf[0]);
 		err = -EIO;
 	}
-	if (resp_size>0) {
-		memcpy(response, buf+rx_size-resp_size, resp_size);
+	if (response && resp_size > 0) {
+		memcpy(response, &buf[rx_size-resp_size], resp_size);
 	}
 
 error:
@@ -210,7 +210,6 @@ static int weiss_dice_write_param(struct dice* dice, struct weiss_cmd_param_op* 
 		dev_err(&dice->unit->device, "AVC param write failed (%i).\n", err);
 		return err;
 	}
-	_dev_info(&dice->unit->device, "ctl put successful\n");
 	return err;
 }
 
@@ -233,7 +232,6 @@ static int weiss_dice_read_param(struct dice* dice, struct weiss_cmd_param_op* p
 		.seq_id = 0xff,
 		.cmd_id = WEISS_CMD_ID_PARAM_OP,
 	};
-	_dev_info(&dice->unit->device, "reading AVC param (ID:%#x)...\n", param->param_id);
 	// operand/response vessel:
 	param->value = 0xffffffff;
 	for (i = 0; i < sizeof(struct weiss_cmd_param_op)/4; ++i) {
@@ -250,7 +248,6 @@ static int weiss_dice_read_param(struct dice* dice, struct weiss_cmd_param_op* p
 	for (i = 0; i < sizeof(struct weiss_cmd_param_op)/4; ++i) {
 		be32_to_cpus(&((u32 *)param)[i]);
 	}
-	_dev_info(&dice->unit->device, "ctl get successful (ID:%#x,val:%#x)\n", param->param_id, param->value);
 	return err;
 }
 static int weiss_dice_dev_const(struct dice* dice, struct weiss_cmd_dev_const* dev_const)
@@ -272,7 +269,6 @@ static int weiss_dice_dev_const(struct dice* dice, struct weiss_cmd_dev_const* d
 		.seq_id = 0xff,
 		.cmd_id = WEISS_CMD_ID_DEV_CONST,
 	};
-	_dev_info(&dice->unit->device, "reading Weiss device constitution...\n");
 	// operand/response vessel:
 	for (i = 0; i < sizeof(struct weiss_cmd_dev_const)/4; ++i) {
 		cpu_to_be32s(&((u32 *)dev_const)[i]);
@@ -287,7 +283,7 @@ static int weiss_dice_dev_const(struct dice* dice, struct weiss_cmd_dev_const* d
 	for (i = 0; i < sizeof(struct weiss_cmd_dev_const)/4; ++i) {
 		be32_to_cpus(&((u32 *)dev_const)[i]);
 	}
-	_dev_info(&dice->unit->device, "Weiss device constitution(params:%#x,attrs:%#x)\n", dev_const->num_params, dev_const->num_attrs);
+	_dev_info(&dice->unit->device, "Weiss device constitution: params:%#x,attrs:%#x\n", dev_const->num_params, dev_const->num_attrs);
 	return err;
 }
 static int weiss_dice_param_info(struct dice* dice, struct weiss_cmd_param_info* param_info)
@@ -309,7 +305,6 @@ static int weiss_dice_param_info(struct dice* dice, struct weiss_cmd_param_info*
 		.seq_id = 0xff,
 		.cmd_id = WEISS_CMD_ID_PARAM_INFO,
 	};
-	_dev_info(&dice->unit->device, "reading param info (ID:%#x)...\n", param_info->param_id);
 	// operand/response vessel:
 	for (i = 0; i < sizeof(struct weiss_cmd_param_info)/4; ++i) {
 		cpu_to_be32s(&((u32 *)param_info)[i]);
@@ -325,23 +320,23 @@ static int weiss_dice_param_info(struct dice* dice, struct weiss_cmd_param_info*
 	for (i = 0; i < sizeof(struct weiss_cmd_param_info)/4; ++i) {
 		be32_to_cpus(&((u32 *)param_info)[i]);
 	}
-	_dev_info(&dice->unit->device, "read param info (ID:%#x,name:'%s',iface:%#x,type:%#x,\n",
-			param_info->param_id, param_info->name, param_info->iface, param_info->type);
-	switch(param_info->type) {
-	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
-		_dev_info(&dice->unit->device, "  items:%#x)\n",
-				param_info->enumerated.items);
-		break;
-	case SNDRV_CTL_ELEM_TYPE_INTEGER:
-		_dev_info(&dice->unit->device, "  min:%#x,max:%#x)\n",
-				param_info->integer.min, param_info->integer.max);
-		break;
-	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
-		break;
-	default:
-		dev_err(&dice->unit->device, "unsupported parameter type (%#x)\n", param_info->type);
-		return -EINVAL;
-	}
+//	_dev_info(&dice->unit->device, "read param info (ID:%#x,name:'%s',iface:%#x,type:%#x,\n",
+//			param_info->param_id, param_info->name, param_info->iface, param_info->type);
+//	switch(param_info->type) {
+//	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
+//		_dev_info(&dice->unit->device, "  items:%#x)\n",
+//				param_info->enumerated.items);
+//		break;
+//	case SNDRV_CTL_ELEM_TYPE_INTEGER:
+//		_dev_info(&dice->unit->device, "  min:%#x,max:%#x)\n",
+//				param_info->integer.min, param_info->integer.max);
+//		break;
+//	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+//		break;
+//	default:
+//		dev_err(&dice->unit->device, "unsupported parameter type (%#x)\n", param_info->type);
+//		return -EINVAL;
+//	}
 	return err;
 }
 static int weiss_dice_enum_item_info(struct dice* dice, struct weiss_cmd_enum_item_info* item_info)
@@ -363,8 +358,6 @@ static int weiss_dice_enum_item_info(struct dice* dice, struct weiss_cmd_enum_it
 		.seq_id = 0xff,
 		.cmd_id = WEISS_CMD_ID_ENUM_ITEM_INFO,
 	};
-	_dev_info(&dice->unit->device, "reading item info (paramID:%#x,itemID:%#x)...\n",
-			item_info->param_id, item_info->item_id);
 	// operand/response vessel:
 	for (i = 0; i < sizeof(struct weiss_cmd_enum_item_info)/4; ++i) {
 		cpu_to_be32s(&((u32 *)item_info)[i]);
@@ -380,15 +373,14 @@ static int weiss_dice_enum_item_info(struct dice* dice, struct weiss_cmd_enum_it
 	for (i = 0; i < sizeof(struct weiss_cmd_enum_item_info)/4; ++i) {
 		be32_to_cpus(&((u32 *)item_info)[i]);
 	}
-	_dev_info(&dice->unit->device, "read item info (paramID:%#x,itemID:%#x,name:'%s')\n",
-			item_info->param_id, item_info->item_id, item_info->name);
+//	_dev_info(&dice->unit->device, "read item info (paramID:%#x,itemID:%#x,name:'%s')\n",
+//			item_info->param_id, item_info->item_id, item_info->name);
 	return err;
 }
 
 static int dice_sync_src_info(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_info *uinfo)
 {
-//	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	static char *texts[13] = {
 		"AES1","AES2","AES3","AES4","AES","ADAT","TDIF","Wordclock","ARX1","ARX2","ARX3","ARX4","Internal"
 	};
@@ -406,9 +398,10 @@ static int dice_sync_src_get(struct snd_kcontrol *kcontrol,
 	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	int err;
 	u32 value;
-	err = dice_ctrl_get_clock(dice, &value);
-	if (err < 0)
+	err = dice_ctrl_get_global_clock_select(dice, &value);
+	if (err < 0) {
 		return err;
+	}
 	value &= CLOCK_SOURCE_MASK;
 	ucontrol->value.enumerated.item[0] = value;
 	return 0;
@@ -416,100 +409,121 @@ static int dice_sync_src_get(struct snd_kcontrol *kcontrol,
 static int dice_sync_src_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	int err = 0;
-#if 0 /* use according method when implemented: */
 	u32 value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
-	err = dice_set_clock_source(dice, &value);
-#endif
-	if (err < 0)
+	err = dice_ctrl_set_clock_source(dice, value, false);
+	if (err < 0) {
 		return err;
+	}
 	return 1;
 }
-
-static int dice_level_info(struct snd_kcontrol *kcontrol,
-					struct snd_ctl_elem_info *uinfo)
-{
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
-	static char *texts[4] = {
-		"0 dB", "-10 dB", "-20 dB", "-30 dB",
-	};
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = 4;
-	if (uinfo->value.enumerated.item > 3)
-		uinfo->value.enumerated.item = 3;
-	strcpy(uinfo->value.enumerated.name, texts[uinfo->value.enumerated.item]);
-	_dev_info(&dice->unit->device,"level info (num:%#x,id:%#x) done.\n", kcontrol->id.numid, kcontrol->id.index);
-	return 0;
-}
-static int dice_level_get(struct snd_kcontrol *kcontrol,
-					struct snd_ctl_elem_value *ucontrol)
-{
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
-	int err;
-	u32 value;
-	_dev_info(&dice->unit->device,"read level value...\n");
-	err = -1;//weiss_dice_read_param(dice, &value);
-	if (err < 0)
-		return err;
-	ucontrol->value.enumerated.item[0] = value;
-	return 0;
-}
-static int dice_level_put(struct snd_kcontrol *kcontrol,
-					struct snd_ctl_elem_value *ucontrol)
-{
-	struct dice *dice = snd_kcontrol_chip(kcontrol);
-	int err;
-	u32 value = ucontrol->value.enumerated.item[0];
-	_dev_info(&dice->unit->device,"write level value (%#x)...\n", value);
-	err = -1;//weiss_dice_write_param(dice, &value);
-	if (err < 0)
-		return err;
-	return 1;
-}
-
-struct dice_weiss_snd_ctl_private_data {
-	struct dice* dice;
-	struct weiss_cmd_param_info param_info;
-};
 
 static int dice_weiss_param_enum_info(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_info *uinfo)
 {
-	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_info param_info = {
+		.param_id = (u32)kcontrol->private_value,
+	};
+	struct weiss_cmd_enum_item_info item_info = {
+		.param_id = (u32)kcontrol->private_value,
+		.item_id = uinfo->value.enumerated.item,
+	};
+	err = weiss_dice_param_info(dice, &param_info);
+	if (err < 0) {
+		return err;
+	}
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
 	uinfo->count = 1;
-	uinfo->value.enumerated.items = private_data->param_info.enumerated.items;
+	uinfo->value.enumerated.items = param_info.enumerated.items;
+	if (uinfo->value.enumerated.item >= uinfo->value.enumerated.items) {
+		uinfo->value.enumerated.item = uinfo->value.enumerated.items - 1;
+	}
+	err = weiss_dice_enum_item_info(dice, &item_info);
+	if (err < 0) {
+		return err;
+	}
+	strcpy(uinfo->value.enumerated.name, item_info.name);
 	return 0;
 }
-static int dice_weiss_param_int_info(struct snd_kcontrol *kcontrol,
-					struct snd_ctl_elem_info *uinfo)
-{
-	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
-	uinfo->count = 1;
-	uinfo->value.integer.min = private_data->param_info.integer.min;
-	uinfo->value.integer.max = private_data->param_info.integer.max;
-	uinfo->value.integer.step = private_data->param_info.integer.step;
-	return 0;
-}
-static int dice_weiss_param_get(struct snd_kcontrol *kcontrol,
+static int dice_weiss_param_enum_get(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
-	struct dice_weiss_snd_ctl_private_data *private_data = snd_kcontrol_chip(kcontrol);
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
 	int err;
-	struct weiss_cmd_param_op param = {
-		.param_id = private_data->param_info.param_id,
-	};
-	_dev_info(&private_data->dice->unit->device,"read level value...\n");
-	err = weiss_dice_read_param(private_data->dice, &param);
+	struct weiss_cmd_param_op param;
+	param.param_id = (u32)kcontrol->private_value;
+	err = weiss_dice_read_param(dice, &param);
 	if (err < 0)
 		return err;
 	ucontrol->value.enumerated.item[0] = param.value;
 	return 0;
 }
+static int dice_weiss_param_enum_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_op param;
+	param.param_id = (u32)kcontrol->private_value;
+	param.value = (u32)(ucontrol->value.enumerated.item[0]);
+//	_dev_info(&dice->unit->device,"put param (E,pID:%#x): %#x...\n", (u32)kcontrol->private_value, param.value);
+	err = weiss_dice_write_param(dice, &param);
+	if (err < 0)
+		return err;
+	return 1;
+}
 
+static int dice_weiss_param_int_info(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_info *uinfo)
+{
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_info param_info;
+	param_info.param_id = (u32)kcontrol->private_value;
+	err = weiss_dice_param_info(dice, &param_info);
+	if (err < 0) {
+		dev_err(&dice->unit->device,"fail to get param info (%i)", err);
+		return err;
+	}
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = param_info.integer.min;
+	uinfo->value.integer.max = param_info.integer.max;
+	uinfo->value.integer.step = param_info.integer.step;
+	return 0;
+}
+static int dice_weiss_param_int_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_op param;
+	param.param_id = (u32)kcontrol->private_value;
+	err = weiss_dice_read_param(dice, &param);
+	if (err < 0) {
+		return err;
+	}
+	ucontrol->value.integer.value[0] = (long)param.value;
+	return 0;
+}
+static int dice_weiss_param_int_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct dice *dice = snd_kcontrol_chip(kcontrol);
+	int err;
+	struct weiss_cmd_param_op param;
+	param.param_id = (u32)kcontrol->private_value;
+	param.value = (u32)(ucontrol->value.integer.value[0]);
+//	_dev_info(&dice->unit->device,"put param (I,pID:%#x): %#x...\n", (u32)kcontrol->private_value, param.value);
+	err = weiss_dice_write_param(dice, &param);
+	if (err < 0) {
+		return err;
+	}
+	return 1;
+}
 /**
  * Weiss specific method for populating its products'
  * snd_ctl's (via custom vendor dependent AV/C commands).
@@ -517,10 +531,9 @@ static int dice_weiss_param_get(struct snd_kcontrol *kcontrol,
 static int dice_weiss_snd_ctl_construct(struct dice* dice)
 {
 	int err;
-	u32 i, j;
 	struct weiss_cmd_dev_const dev_const;
 	struct weiss_cmd_param_info param_info;
-	struct weiss_cmd_enum_item_info enum_info;
+	u32 i;
 	err = weiss_dice_dev_const(dice, &dev_const);
 	if (err < 0)
 		return err;
@@ -530,64 +543,54 @@ static int dice_weiss_snd_ctl_construct(struct dice* dice)
 		err = weiss_dice_param_info(dice, &param_info);
 		if (err < 0)
 			continue;
-		if (param_info.iface > SNDRV_CTL_ELEM_IFACE_LAST) {
+		if (param_info.iface > (u32)SNDRV_CTL_ELEM_IFACE_LAST) {
 			dev_err(&dice->unit->device,"invalid iface (%#x)\n", param_info.iface);
 			continue;
 		}
 		switch (param_info.type) {
 		case SNDRV_CTL_ELEM_TYPE_ENUMERATED: {
 				struct snd_kcontrol_new control = {
-					.iface = param_info.iface,
+					.iface = (snd_ctl_elem_iface_t) param_info.iface,
 					.name = param_info.name,
 					.info = dice_weiss_param_enum_info,
+					.get = dice_weiss_param_enum_get,
+					.put = dice_weiss_param_enum_put,
+					.private_value = i,
 				};
-				struct dice_weiss_snd_ctl_private_data private_data = {
-					.dice = dice,
-					.param_info = param_info,
-				};
-//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
-				if (err < 0)
+				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, dice));
+				if (err < 0) {
 					return err;
-				for (j=0; j<param_info.enumerated.items; ++j) {
-					enum_info.param_id = i;
-					enum_info.item_id = j;
-					err = weiss_dice_enum_item_info(dice, &enum_info);
-					if (err < 0) {
-						break;
-					}
 				}
 			}
 			break;
 		case SNDRV_CTL_ELEM_TYPE_INTEGER: {
 				struct snd_kcontrol_new control = {
-					.iface = param_info.iface,
+					.iface = (snd_ctl_elem_iface_t) param_info.iface,
 					.name = param_info.name,
 					.info = dice_weiss_param_int_info,
-					.get = dice_weiss_param_get,
+					.get = dice_weiss_param_int_get,
+					.put = dice_weiss_param_int_put,
+					.private_value = i,
 				};
-				struct dice_weiss_snd_ctl_private_data private_data = {
-					.dice = dice,
-					.param_info = param_info,
-				};
-//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
-				if (err < 0)
+				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, dice));
+				if (err < 0) {
 					return err;
+				}
 			}
 			break;
 		case SNDRV_CTL_ELEM_TYPE_BOOLEAN: {
 				struct snd_kcontrol_new control = {
-					.iface = param_info.iface,
+					.iface = (snd_ctl_elem_iface_t) param_info.iface,
 					.name = param_info.name,
 					.info = snd_ctl_boolean_mono_info,
-					.get = dice_weiss_param_get,
+					.get = dice_weiss_param_int_get,
+					.put = dice_weiss_param_int_put,
+					.private_value = i,
 				};
-				struct dice_weiss_snd_ctl_private_data private_data = {
-					.dice = dice,
-					.param_info = param_info,
-				};
-//				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, &private_data));
-				if (err < 0)
+				err = snd_ctl_add(dice->card, snd_ctl_new1(&control, dice));
+				if (err < 0) {
 					return err;
+				}
 			}
 			break;
 		default:

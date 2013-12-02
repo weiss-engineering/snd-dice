@@ -10,7 +10,7 @@
 #include <linux/firewire.h>
 #include <linux/firewire-constants.h>
 #include "../lib.h"
-#include "dice-firmware.h"
+#include "firmware.h"
 
 /*
  * Firmware loading is handled by the "DICE firmwareloader" interface.  Its registers are
@@ -112,7 +112,6 @@ static int dice_fl_cmd_exec(struct dice* dice, unsigned int const opcode, unsign
 			break;
 		}
 		if (t_poll_ms*++attempts < t_timeout_ms) {
-//			_dev_info(&dice->unit->device, "exec attempt %i (%u < %u)...", attempts, t_poll_ms*attempts, t_timeout_ms);
 			continue;
 		}
 		dev_warn(&dice->unit->device, "FL opcode exec timeout (%u > %u).", t_poll_ms*attempts, t_timeout_ms);
@@ -348,7 +347,7 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 	unsigned int index = 0;
 	unsigned int checksum = 0;
 	unsigned int i = 0;
-#ifdef DEBUG_DICE_FW_BIN_NAME
+#if 1
 	u8 debug_progr = 0;
 #endif
 
@@ -394,7 +393,7 @@ static int dice_fl_upload_blocks(struct dice* dice, struct firmware const* fw)
 			goto upload_err;
 		}
 		index += block_len;
-#ifdef DEBUG_DICE_FW_BIN_NAME
+#if 1
 		if (((100*index/fw->size) % 10 == 0) && ((100*index/fw->size) != debug_progr)) {
 			debug_progr = (100*index/fw->size);
 			_dev_info(&dice->unit->device, "  FW progress: %i%%", debug_progr);
@@ -474,7 +473,7 @@ int dice_firmware_load(struct dice* dice, struct firmware const* fw, bool force)
 					DICE_FW_VERSION32_MAJOR(dice->app_info.ui_application_version),DICE_FW_VERSION32_MINOR(dice->app_info.ui_application_version),DICE_FW_VERSION32_SUB(dice->app_info.ui_application_version),DICE_FW_VERSION32_BUILD(dice->app_info.ui_application_version));
 			return -EPERM;
 		}
-#ifndef DEBUG_DICE_FW_BIN_NAME
+#if 0
 		if ((file_firmware_info->ui_application_version == dice->app_info.ui_application_version) &&
 				file_firmware_info->ui_base_sdk_version <= dice->app_info.ui_base_sdk_version) {
 			dev_warn(&dice->unit->device, "supplied firmware (%i.%i.%i.%i, SDK:%i.%i.%i.%i) is inferior to current DICE firmware (%i.%i.%i.%i, SDK:%i.%i.%i.%i)",
@@ -552,7 +551,8 @@ int dice_firmware_load(struct dice* dice, struct firmware const* fw, bool force)
 	return 0;
 }
 
-static void dice_fl_firmware_failed(struct dice* dice, const struct firmware *fw) {
+static void dice_firmware_load_failed(struct dice* dice, const struct firmware *fw)
+{
 	if (fw) {
 		_dev_info(&dice->unit->device, "releasing firmware (size: %i).\n",fw->size);
 		release_firmware(fw);
@@ -565,7 +565,7 @@ void dice_firmware_load_async(const struct firmware *fw, void *context)
 	struct dice* dice = context;
 
 	if (!fw) {
-		dev_err(&dice->unit->device, "firmware not found.\n");
+		dev_warn(&dice->unit->device, "firmware not found.\n");
 		goto fw_done;
 	}
 	_dev_info(&dice->unit->device, "firmware found (size: %i).\n",fw->size);
@@ -576,5 +576,5 @@ void dice_firmware_load_async(const struct firmware *fw, void *context)
 	}
 
 fw_done:
-	dice_fl_firmware_failed(dice, fw);
+	dice_firmware_load_failed(dice, fw);
 }
