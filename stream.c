@@ -336,7 +336,7 @@ dice_stream_start_instance(struct dice* dice, struct dice_stream* stream, unsign
 		return 0;
 	}
 
-	printk("dice_stream_start_instance %s.\n", stream_name(&stream->stream));
+	dev_notice(&dice->unit->device, "dice_stream_start_instance %s.\n", stream_name(&stream->stream));
 
 	dice_stream_configure(dice, stream, sample_rate);
 	err = amdtp_stream_start(&stream->stream,
