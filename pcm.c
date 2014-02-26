@@ -344,7 +344,14 @@ dice_pcm_hw_free(struct snd_pcm_substream *substream)
 	 * 		stop slave stream
 	 */
 	{
-		/* TODO: Verify this shutdown sequence! */
+		/* TODO: Verify this shutdown sequence!
+		 *
+		 * Note: I think that we need the master stream in any case because
+		 * even if we are the sync master the dice needs this stream to
+		 * extract the clock from it. Therefore the master stream has to run
+		 * in any case.
+		 *
+		 */
 		enum amdtp_stream_sync_mode sync_mode;
 		struct dice_stream *master;
 		struct dice_stream *slave;
