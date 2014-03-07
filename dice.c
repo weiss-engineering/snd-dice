@@ -642,9 +642,9 @@ static void dice_snd_card_free_callback(struct snd_card *card)
 	mutex_destroy(&dice->mutex);
 }
 
-static int dice_interface_check(struct fw_unit *unit)
+static int __devinit dice_interface_check(struct fw_unit *unit)
 {
-	static const int min_values[10] = {
+	static const int min_values[10] __devinitconst = {
 		10, 0x64 / 4,
 		10, 0x18 / 4,
 		10, 0x18 / 4,
@@ -718,7 +718,7 @@ static int dice_interface_check(struct fw_unit *unit)
 	return vendor;
 }
 
-static int dice_read_params(struct dice *dice)
+static int __devinit dice_read_params(struct dice *dice)
 {
 	__be32 pointers[8];
 	__be32 value;
@@ -769,7 +769,7 @@ static int dice_read_params(struct dice *dice)
 	return 0;
 }
 
-static void dice_card_strings(struct dice *dice)
+static void __devinit dice_card_strings(struct dice *dice)
 {
 	struct snd_card *card = dice->card;
 	struct fw_device *dev = fw_parent_device(dice->unit);
@@ -804,8 +804,9 @@ static void dice_card_strings(struct dice *dice)
 	strcpy(card->mixername, "DICE");
 }
 
-static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
+static int __devinit dice_probe(struct device *unit_dev)
 {
+	struct fw_unit *unit = fw_unit(unit_dev);
 	struct snd_card *card;
 	struct dice *dice;
 	int vendor, err;
@@ -818,7 +819,7 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
 	err = snd_card_create(-1, NULL, THIS_MODULE, sizeof(*dice), &card);
 	if (err < 0)
 		return err;
-	snd_card_set_dev(card, &unit->device);
+	snd_card_set_dev(card, unit_dev);
 
 	dice = card->private_data;
 	dice->card = card;
@@ -901,7 +902,7 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
 	if (err < 0)
 		goto err_stream;
 
-	dev_set_drvdata(&unit->device, dice);
+	dev_set_drvdata(unit_dev, dice);
 
 	return 0;
 
@@ -919,9 +920,9 @@ err_unit:
 	return err;
 }
 
-static void dice_remove(struct fw_unit *unit)
+static int __devexit dice_remove(struct device *dev)
 {
-	struct dice *dice = dev_get_drvdata(&unit->device);
+	struct dice *dice = dev_get_drvdata(dev);
 
 	dice_stream_pcm_abort(dice);
 
@@ -935,6 +936,8 @@ static void dice_remove(struct fw_unit *unit)
 	mutex_unlock(&dice->mutex);
 
 	snd_card_free_when_closed(dice->card);
+
+	return 0;
 }
 
 static void dice_fw_bus_reset_callback(struct fw_unit *unit)
@@ -986,10 +989,10 @@ static struct fw_driver dice_driver = {
 		.owner	= THIS_MODULE,
 		.name	= KBUILD_MODNAME,
 		.bus	= &fw_bus_type,
+		.probe	= dice_probe,
+		.remove	= __devexit_p(dice_remove),
 	},
-	.probe    = dice_probe,
 	.update   = dice_fw_bus_reset_callback,
-	.remove   = dice_remove,
 	.id_table = dice_id_table,
 };
 
