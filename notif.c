@@ -178,26 +178,32 @@ static void dice_notif_work(struct work_struct *work)
 	 * data is ready when we signal the "clock accepted" below.
 	 */
 	if (rx || tx){
-		if (rx)
+		if (rx) {
 			dbg_log("NOTIFY_RX_CFG_CHG[%i]\n", count);
-		if (tx)
+		}
+		if (tx) {
 			dbg_log("NOTIFY_TX_CFG_CHG[%i]\n", count);
+		}
 		dice_process_rx_tx_reconfig(dice, rx, tx);
 	}
 
 	if (notif_work->notif_bits & NOTIFY_LOCK_CHG) {
 		dbg_log("NOTIFY_LOCK_CHG[%i]\n", count);
 		dice_process_lock_change(dice);
+		dice_process_interface_change(dice);
 	}
 
-	if (notif_work->notif_bits & NOTIFY_DUP_ISOC_BIT)
+	if (notif_work->notif_bits & NOTIFY_DUP_ISOC_BIT) {
 		dbg_log("NOTIFY_DUP_ISOC_BIT[%i]\n", count);
+	}
 
-	if (notif_work->notif_bits & NOTIFY_BW_ERR_BIT)
+	if (notif_work->notif_bits & NOTIFY_BW_ERR_BIT) {
 		dbg_log("NOTIFY_BW_ERR_BIT[%i]\n", count);
+	}
 
 	if (notif_work->notif_bits & NOTIFY_INTERFACE_CHG) {
 		dbg_log("NOTIFY_INTERFACE_CHANGE[%i]\n", count);
+		dice_process_lock_change(dice);
 		dice_process_interface_change(dice);
 	}
 
@@ -211,7 +217,7 @@ static void dice_notif_work(struct work_struct *work)
 		complete(&dice->clock_accepted);
 	}
 
-	if (notif_work->notif_bits & DICE_NOTIF_OTHER_MASK)
+	if (notif_work->notif_bits & DICE_NOTIF_OTHER_MASK) {
 		/* Insert your vendor/product specific notification handler here:
 		 *
 		 * if (dice->vendor == OUI_WEISS) {
@@ -221,6 +227,7 @@ static void dice_notif_work(struct work_struct *work)
 		dev_notice(&dice->unit->device,
 		           "NOTIFY_OTHER[%i] - unknown/vendor/model notification(s): %x\n",
 		           count, notif_work->notif_bits & DICE_NOTIF_OTHER_MASK);
+	}
 
 	count++;
 

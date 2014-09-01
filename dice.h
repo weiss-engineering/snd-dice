@@ -86,6 +86,9 @@ struct dice_ext_sync_info {
 	u32 adat_user_data;
 };
 
+#define DICE_NUM_RATES	7
+#define DICE_NUM_MODES	3
+
 struct dice {
 	struct snd_card *card;
 	struct snd_pcm *pcm;
@@ -118,14 +121,16 @@ struct dice {
 	struct dice_stream playback;
 	struct dice_stream capture;
 
+	struct dice_stream_config ladisch_scan_stream_config_results[DICE_NUM_MODES];
+
 	struct dice_firmware_info app_info;
 };
 
-#define DICE_NUM_RATES	7
 extern const unsigned int dice_rates[DICE_NUM_RATES];
 
 unsigned int dice_rate_to_index(unsigned int rate);
-
+int dice_rate_index_to_mode(unsigned int rate_index);
+int dice_highest_rate_index_for_mode(struct dice *dice, unsigned int mode);
 
 void dice_lock_changed(struct dice *dice);
 int dice_try_lock(struct dice *dice);

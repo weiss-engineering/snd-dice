@@ -25,7 +25,7 @@
 
 MODULE_DESCRIPTION("DICE driver");
 MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de>, "
-              "Rolf Anderegg <rolf.anderegg@weiss.ch> and "
+              "Rolf Anderegg <rolf.anderegg@weiss.ch>, "
               "Uli Franke <uli.franke@weiss.ch>");
 MODULE_LICENSE("GPL v2");
 
@@ -51,6 +51,35 @@ unsigned int dice_rate_to_index(unsigned int rate)
 			return i;
 
 	return 0;
+}
+
+int dice_rate_index_to_mode(unsigned int rate_index)
+{
+	switch (rate_index) {
+	case 0:
+	case 1:
+	case 2:
+		return 0;
+	case 3:
+	case 4:
+		return 1;
+	case 5:
+	case 6:
+		return 2;
+	}
+	return -1;
+}
+
+int dice_highest_rate_index_for_mode(struct dice *dice, unsigned int mode)
+{
+    int i;
+
+    for (i = ARRAY_SIZE(dice_rates) - 1; i >= 0; --i)
+    	if ((dice->global_settings.clock_caps & (1 << i)) &&
+    			dice_rate_index_to_mode(i) == mode)
+    		return i;
+
+    return -1;
 }
 
 void dice_lock_changed(struct dice *dice)
@@ -276,12 +305,6 @@ static int dice_set_global_clock_select_wait(struct dice *dice, u32 clock_sel)
 	u32 read_back;
 	int err;
 
-	if (dice_stream_is_any_running(dice)) {
-		dev_err(&dice->unit->device, "clock setup can not be changed while streams are running.\n");
-		/* TODO: Correct error value? */
-		return -EPERM;
-	}
-
 	INIT_COMPLETION(dice->clock_accepted);
 
 	value = cpu_to_be32(clock_sel);
@@ -315,6 +338,12 @@ int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate, bool force
 {
 	u32 global_clock_sel;
 	int err;
+
+	if (dice_stream_is_any_running(dice)) {
+		dev_err(&dice->unit->device, "clock setup can not be changed while streams are running.\n");
+		/* TODO: Correct error value? */
+		return -EPERM;
+	}
 
 	/* TODO: Use the local cached value at dice->global_settings.clock_select ? */
 	err = dice_ctrl_get_global_clock_select(dice, &global_clock_sel);
@@ -844,6 +873,10 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *id)
 	if (err < 0)
 		goto err_unit;
 
+#ifdef DICE_GENL_ENABLE
+	err = dice_genl_register(dice);
+#endif
+
 	err = dice_owner_set(dice);
 	if (err < 0)
 		goto err_notification_handler;
@@ -931,6 +964,9 @@ static void dice_remove(struct fw_unit *unit)
 
 	dice_stream_stop_all(dice);
 	dice_owner_clear(dice);
+#ifdef DICE_GENL_ENABLE
+	dice_genl_unregister(dice);
+#endif
 
 	mutex_unlock(&dice->mutex);
 

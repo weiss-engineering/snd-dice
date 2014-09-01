@@ -56,9 +56,11 @@ dice_amdtp_from_pcm_substream(struct snd_pcm_substream *substream)
 	return &dice_stream_from_pcm_substream(substream)->stream;
 }
 
-#if 0	/* TODO !!!! */
+/* Do we need special constraints for RX and TX ? If so we have to
+ * store the ladisch scan results in separate structures.
+ */
 
-static int dice_rate_constraint(struct snd_pcm_hw_params *params,
+static int dice_pcm_rate_constraint(struct snd_pcm_hw_params *params,
 				struct snd_pcm_hw_rule *rule)
 {
 	struct dice *dice = rule->private;
@@ -73,8 +75,8 @@ static int dice_rate_constraint(struct snd_pcm_hw_params *params,
 
 	for (i = 0; i < ARRAY_SIZE(dice_rates); ++i) {
 		mode = dice_rate_index_to_mode(i);
-		if ((dice->clock_caps & (1 << i)) &&
-		    snd_interval_test(channels, dice->rx.channels[mode])) {
+		if ((dice->global_settings.clock_caps & (1 << i)) &&
+		    snd_interval_test(channels, dice->ladisch_scan_stream_config_results[mode].num_pcm_ch)) {
 			allowed_rates.min = min(allowed_rates.min,
 						dice_rates[i]);
 			allowed_rates.max = max(allowed_rates.max,
@@ -85,7 +87,7 @@ static int dice_rate_constraint(struct snd_pcm_hw_params *params,
 	return snd_interval_refine(rate_index, &allowed_rates);
 }
 
-static int dice_channels_constraint(struct snd_pcm_hw_params *params,
+static int dice_pcm_channels_constraint(struct snd_pcm_hw_params *params,
 				    struct snd_pcm_hw_rule *rule)
 {
 	struct dice *dice = rule->private;
@@ -99,19 +101,71 @@ static int dice_channels_constraint(struct snd_pcm_hw_params *params,
 	unsigned int i, mode;
 
 	for (i = 0; i < ARRAY_SIZE(dice_rates); ++i)
-		if ((dice->clock_caps & (1 << i)) &&
+		if ((dice->global_settings.clock_caps & (1 << i)) &&
 		    snd_interval_test(rate_index, dice_rates[i])) {
 			mode = dice_rate_index_to_mode(i);
 			allowed_channels.min = min(allowed_channels.min,
-						   dice->rx.channels[mode]);
+			                           dice->ladisch_scan_stream_config_results[mode].num_pcm_ch);
 			allowed_channels.max = max(allowed_channels.max,
-						   dice->rx.channels[mode]);
+			                           dice->ladisch_scan_stream_config_results[mode].num_pcm_ch);
 		}
 
 	return snd_interval_refine(channels, &allowed_channels);
 }
-#endif
 
+static int dice_pcm_ladisch_scan(struct dice* dice,
+                                 unsigned int clock_select,
+                                 struct dice_stream* stream)
+{
+	unsigned int mode, current_index, current_mode;
+
+	memset (&dice->ladisch_scan_stream_config_results,
+	        0,
+	        sizeof(struct dice_stream_config) * DICE_NUM_MODES);
+
+	current_index = (clock_select & CLOCK_RATE_MASK) >> CLOCK_RATE_SHIFT;
+	current_mode = dice_rate_index_to_mode(current_index);
+
+	if (current_mode < 0) {
+		/* TODO: In case the current rate index is somehow warped. */
+	}
+
+//	dev_notice(&dice->unit->device, "Performing Ladisch scan with current mode: %u, current rate index: %u", current_mode, current_index);
+
+	mutex_lock(&dice->mutex);
+	dice->ladisch_scan_stream_config_results[current_mode] = stream->config;
+	mutex_unlock(&dice->mutex);
+
+	for (mode = 0; mode < DICE_NUM_MODES; mode++) {
+		if (mode != current_mode) {
+
+			int rate_index = dice_highest_rate_index_for_mode(dice, mode);
+			if (rate_index < 0) {
+				/* mode probably not supported - stream config remains zeroed */
+				continue;
+			}
+
+			/* check capabilities ... */
+//			dev_notice(&dice->unit->device, "Scanning mode: %u, rate index: %u", mode, rate_index);
+
+			dice_ctrl_change_rate(dice, rate_index << CLOCK_RATE_SHIFT, false);
+
+//			dev_notice(&dice->unit->device, "Storing mode stream setup for mode: %u", mode);
+
+			mutex_lock(&dice->mutex);
+			dice->ladisch_scan_stream_config_results[mode] = stream->config;
+			mutex_unlock(&dice->mutex);
+		}
+	}
+
+	/* Scan done - revert to previous rate */
+//	dev_notice(&dice->unit->device, "Reverting to original rate index: %u", current_index);
+	dice_ctrl_change_rate(dice, current_index << CLOCK_RATE_SHIFT, false);
+
+	dev_notice(&dice->unit->device, "Ladisch scan done.");
+
+	return 0;
+}
 
 static int dice_pcm_open(struct snd_pcm_substream *substream)
 {
@@ -154,8 +208,8 @@ static int dice_pcm_open(struct snd_pcm_substream *substream)
 		 * the sample rate and the stream layouts are known and fixed.
 		 */
 		mutex_lock(&dice->mutex);
+
 		sync_info = dice->extended_sync_info;
-		mutex_unlock(&dice->mutex);
 
 		dbg_log("Streaming already active. Limiting sample rate to %i, channels to %i.",
 		        dice_rates[sync_info.rate_index],
@@ -166,7 +220,13 @@ static int dice_pcm_open(struct snd_pcm_substream *substream)
 
 		runtime->hw.channels_min = stream->config.num_pcm_ch;
 		runtime->hw.channels_max = stream->config.num_pcm_ch;
+
+		mutex_unlock(&dice->mutex);
+
 	} else {
+		/* No stream active. All rates and channel layouts are still available.
+		 * We have to assemble them here.
+		 */
 		mutex_lock(&dice->mutex);
 		clock_select = dice->global_settings.clock_select;
 		mutex_unlock(&dice->mutex);
@@ -177,33 +237,37 @@ static int dice_pcm_open(struct snd_pcm_substream *substream)
 				runtime->hw.rates |=
 					snd_pcm_rate_to_rate_bit(dice_rates[i]);
 
-		/* Channel count is not known yet as it can change when the sample
-		 * rate is set. Or we perform a "Ladisch-Scan" here... */
+		/* Try to get channel count with current device settings by "Ladisch-
+		 * scanning" all modes.
+		 */
+		err = dice_pcm_ladisch_scan (dice, clock_select, stream);
+		if (err < 0)
+			goto err_lock;
+
+		for (i = 0; i < DICE_NUM_MODES; ++i) {
+			unsigned int n_ch = dice->ladisch_scan_stream_config_results[i].num_pcm_ch;
+			if (n_ch) {
+				runtime->hw.channels_min = min(runtime->hw.channels_min,
+				                               n_ch);
+				runtime->hw.channels_max = max(runtime->hw.channels_max,
+				                               n_ch);
+			}
+		}
+
+		err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_RATE,
+		                          dice_pcm_rate_constraint, dice,
+		                          SNDRV_PCM_HW_PARAM_CHANNELS, -1);
+		if (err < 0)
+			goto err_lock;
+		err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_CHANNELS,
+		                          dice_pcm_channels_constraint, dice,
+		                          SNDRV_PCM_HW_PARAM_RATE, -1);
+		if (err < 0)
+			goto err_lock;
 	}
 	err = snd_pcm_limit_hw_rates(runtime);
 	if (err < 0)
 		goto err_lock;
-
-#if 0
-	for (i = 0; i < DICE_NUM_MODES; ++i)
-		if (layout->channels[i]) {
-			runtime->hw.channels_min = min(runtime->hw.channels_min,
-			                               layout->channels[i]);
-			runtime->hw.channels_max = max(runtime->hw.channels_max,
-			                               layout->channels[i]);
-		}
-
-	err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_RATE,
-				  dice_rate_constraint, dice,
-				  SNDRV_PCM_HW_PARAM_CHANNELS, -1);
-	if (err < 0)
-		goto err_lock;
-	err = snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_CHANNELS,
-				  dice_channels_constraint, dice,
-				  SNDRV_PCM_HW_PARAM_RATE, -1);
-	if (err < 0)
-		goto err_lock;
-#endif
 
 	err = snd_pcm_hw_constraint_step(runtime, 0,
 					 SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 32);

@@ -67,6 +67,22 @@ static unsigned int dice_hwdep_poll(struct snd_hwdep *hwdep, struct file *file,
 	return events;
 }
 
+static int dice_hwdep_get_glob_settings_info(struct dice *dice, void __user *arg)
+{
+	if (copy_to_user(arg, &dice->global_settings, sizeof(dice->global_settings))) {
+		return -EFAULT;
+	}
+	return 0;
+}
+
+static int dice_hwdep_get_ext_sync_info(struct dice *dice, void __user *arg)
+{
+	if (copy_to_user(arg, &dice->extended_sync_info, sizeof(dice->extended_sync_info))) {
+		return -EFAULT;
+	}
+	return 0;
+}
+
 static int dice_hwdep_get_info(struct dice *dice, void __user *arg)
 {
 	struct fw_device *dev = fw_parent_device(dice->unit);
@@ -146,6 +162,10 @@ static int dice_hwdep_ioctl(struct snd_hwdep *hwdep, struct file *file,
 		return dice_hwdep_lock(dice);
 	case SNDRV_FIREWIRE_IOCTL_UNLOCK:
 		return dice_hwdep_unlock(dice);
+	case SNDRV_DICE_IOCTL_GET_GLOB_SETTINGS:
+		return dice_hwdep_get_glob_settings_info(dice, (void __user *)arg);
+	case SNDRV_DICE_IOCTL_GET_EXT_SYNC_STATUS:
+		return dice_hwdep_get_ext_sync_info(dice, (void __user *)arg);
 	default:
 		return -ENOIOCTLCMD;
 	}
