@@ -498,7 +498,7 @@ int dice_stream_stop_all (struct dice* dice)
 
 bool dice_stream_is_any_running(struct dice *dice)
 {
-	return amdtp_stream_running (&dice->capture.stream) ||
+	return amdtp_stream_running (&dice->playback.stream) ||
 			amdtp_stream_running (&dice->capture.stream);
 }
 
