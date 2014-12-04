@@ -395,12 +395,8 @@ int dice_stream_start (struct dice* dice,
 		master_started = true;
 	}
 
-	/* Start requested stream (if not master it isn't running yet) */
-	if (stream != master) {
-		/* We stop streaming for slave stream setup */
-		dice_ctrl_enable_clear(dice);
-
-		err = dice_stream_start_instance(dice, stream, sample_rate);
+	if (!amdtp_stream_running(&slave->stream)) {
+		err = dice_stream_start_instance(dice, slave, sample_rate);
 		if (err < 0) {
 			goto error;
 		}

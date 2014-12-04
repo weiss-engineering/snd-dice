@@ -50,6 +50,18 @@ dice_stream_from_pcm_substream(struct snd_pcm_substream *substream)
 	}
 }
 
+/** Returns the capture stream when querying with playback stream and vice versa.
+ */
+static inline struct dice_stream*
+dice_stream_other(struct dice* dice, struct dice_stream *this)
+{
+	if (this == &dice->capture) {
+		return &dice->playback;
+	} else {
+		return &dice->capture;
+	}
+}
+
 static inline struct amdtp_stream*
 dice_amdtp_from_pcm_substream(struct snd_pcm_substream *substream)
 {
@@ -300,12 +312,11 @@ error:
 static int dice_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct dice *dice = substream->private_data;
-	struct dice_stream* stream = dice_stream_from_pcm_substream(substream);
+//	struct dice_stream* stream = dice_stream_from_pcm_substream(substream);
 
 	dbg_log_func();
 
 	mutex_lock(&dice->mutex);
-	stream->pcm_substream = NULL;
 
 	/* TODO: Check if any of the streams is still running when all pcms are NULL! */
 
@@ -335,6 +346,11 @@ static int dice_pcm_hw_params(struct snd_pcm_substream *substream,
 	stream = dice_stream_from_pcm_substream(substream);
 	if (amdtp_stream_running(&stream->stream)) {
 		dbg_log(".hw_params called on running/already configured stream.\n");
+
+		mutex_lock(&dice->mutex);
+		stream->pcm_substream = substream;
+		mutex_unlock(&dice->mutex);
+
 		return 0;
 	}
 
@@ -389,63 +405,28 @@ static int
 dice_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	struct dice *dice = substream->private_data;
+	struct dice_stream *this_stream;
+	struct dice_stream *other_stream;
+
+	dbg_log_func();
 
 	mutex_lock(&dice->mutex);
-#if 1
-#	if 0
-	/* TODO: We should stop just the stream belonging to this PCM substream
-	 * and the master stream if the PCM substream associated with it is not
-	 * open. */
-	dice_stream_stop_all(dice);
-#	else
-	/*
-	 * if stream master:
-	 * 		if slave pcm open:
-	 * 			do nothing
-	 * 		else:
-	 * 			stop master
-	 * else (if stream slave):
-	 * 		stop slave stream
-	 */
-	{
-		/* TODO: Verify this shutdown sequence!
-		 *
-		 * Note: I think that we need the master stream in any case because
-		 * even if we are the sync master the dice needs this stream to
-		 * extract the clock from it. Therefore the master stream has to run
-		 * in any case.
-		 *
-		 */
-		enum amdtp_stream_sync_mode sync_mode;
-		struct dice_stream *master;
-		struct dice_stream *slave;
-		struct dice_stream *stream = dice_stream_from_pcm_substream(substream);
-		dice_get_stream_roles_from_streams(dice,
-							  &sync_mode,
-							  &master,
-							  &slave);
-		if (sync_mode == AMDTP_STREAM_SYNC_MODE_MASTER) {
-			dice_stream_stop(dice, stream);
+
+	this_stream = dice_stream_from_pcm_substream(substream);
+	other_stream = dice_stream_other(dice, this_stream);
+
+	if (this_stream->pcm_substream) {
+		if (!other_stream->pcm_substream) {
+			/* No PCM device open anymore - we can shut down all streams */
+			dice_stream_stop_all(dice);
+			dev_notice(&dice->unit->device, "No PCM device open anymore, shutting down 1394 streams.\n");
 		} else {
-			if (stream == master) {
-				if (!slave->pcm_substream ) {
-					/* slave needs master to run: stop only if slave is not running. */
-					dice_stream_stop(dice, stream);
-				}
-			} else {
-				if ( master->pcm_substream /* master pcm is open */) {
-					/* Master PCM is open - we just stop the slave. */
-					dice_stream_stop(dice, stream);
-				} else {
-					dice_stream_stop_all(dice);
-				}
-			}
+			dev_notice(&dice->unit->device, "Other PCM device open, keeping 1394 streams alive.\n");
 		}
+
+		this_stream->pcm_substream = NULL;
 	}
-#	endif
-#else
-	dice_stream_stop(dice, dice_dir_from_substream(substream));
-#endif
+
 	mutex_unlock(&dice->mutex);
 
 	return snd_pcm_lib_free_vmalloc_buffer(substream);
