@@ -396,6 +396,22 @@ static const struct ieee1394_device_id dice_id_table[] = {
 		.match_flags = IEEE1394_MATCH_VERSION,
 		.version     = DICE_INTERFACE,
 	},
+	/* Weiss DAC202. */
+	{
+		.match_flags	= IEEE1394_MATCH_VENDOR_ID |
+				  IEEE1394_MATCH_MODEL_ID,
+		.vendor_id	= OUI_WEISS,
+		.model_id	= 0x000007,
+		.driver_data = (kernel_ulong_t)snd_dice_detect_weiss_formats,
+	},
+	/* Weiss MAN301. */
+	{
+		.match_flags	= IEEE1394_MATCH_VENDOR_ID |
+				  IEEE1394_MATCH_MODEL_ID,
+		.vendor_id	= OUI_WEISS,
+		.model_id	= 0x00000b,
+		.driver_data = (kernel_ulong_t)snd_dice_detect_weiss_formats,
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(ieee1394, dice_id_table);
