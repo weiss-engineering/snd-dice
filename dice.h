@@ -1,200 +1,236 @@
-#ifndef SOUND_FIREWIRE_DICE_H_INCLUDED
-#define SOUND_FIREWIRE_DICE_H_INCLUDED
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * dice.h - a part of driver for Dice based devices
+ *
+ * Copyright (c) Clemens Ladisch
+ * Copyright (c) 2014 Takashi Sakamoto
+ */
 
+#ifndef SOUND_DICE_H_INCLUDED
+#define SOUND_DICE_H_INCLUDED
+
+#include <linux/compat.h>
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/firewire.h>
+#include <linux/firewire-constants.h>
+#include <linux/jiffies.h>
+#include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
-#include <linux/workqueue.h>
-#include "../amdtp.h"
+#include <linux/sched/signal.h>
+
+#include <sound/control.h>
+#include <sound/core.h>
+#include <sound/firewire.h>
+#include <sound/hwdep.h>
+#include <sound/info.h>
+#include <sound/initval.h>
+#include <sound/pcm.h>
+#include <sound/pcm_params.h>
+#include <sound/rawmidi.h>
+
+#include "../amdtp-am824.h"
 #include "../iso-resources.h"
-#include "interface.h"
+#include "../lib.h"
+#include "dice-interface.h"
 
-#define OUI_MAUDIO		0x000d6c
-#define OUI_WEISS		0x001c6a
+/*
+ * This module support maximum 2 pairs of tx/rx isochronous streams for
+ * our convinience.
+ *
+ * In documents for ASICs called with a name of 'DICE':
+ *  - ASIC for DICE II:
+ *   - Maximum 2 tx and 4 rx are supported.
+ *   - A packet supports maximum 16 data channels.
+ *  - TCD2210/2210-E (so-called 'Dice Mini'):
+ *   - Maximum 2 tx and 2 rx are supported.
+ *   - A packet supports maximum 16 data channels.
+ *  - TCD2220/2220-E (so-called 'Dice Jr.')
+ *   - 2 tx and 2 rx are supported.
+ *   - A packet supports maximum 16 data channels.
+ *  - TCD3070-CH (so-called 'Dice III')
+ *   - Maximum 2 tx and 2 rx are supported.
+ *   - A packet supports maximum 32 data channels.
+ *
+ * For the above, MIDI conformant data channel is just on the first isochronous
+ * stream.
+ */
+#define MAX_STREAMS	2
 
-#define DICE_CATEGORY_ID	0x04
-#define WEISS_CATEGORY_ID	0x00
-
-/** Maximum number of isochronous channels per direction. */
-#define DICE_MAX_FW_ISOC_CH		4
-
-/** Data directions as seen from DICE' perspective. */
-enum dice_direction {
-	DICE_RX = 0,
-	DICE_TX = 1,
-	DICE_PLAYBACK = DICE_RX,
-	DICE_CAPTURE = DICE_TX
+enum snd_dice_rate_mode {
+	SND_DICE_RATE_MODE_LOW = 0,
+	SND_DICE_RATE_MODE_MIDDLE,
+	SND_DICE_RATE_MODE_HIGH,
+	SND_DICE_RATE_MODE_COUNT,
 };
 
-struct dice_stream_config {
-	bool valid;
-	/** Number of isochronous fw channels. */
-	unsigned int num_isoc_ch;
-	/** Total number of PCM channels (accumulated
-	 * PCM channels over all isochronous fw channels). */
-	unsigned int num_pcm_ch;
-	/** Total number of MIDI channels (accumulated
-	 * PCM channels over all isochronous fw channels). */
-	unsigned int num_midi_ch;
+struct snd_dice;
+typedef int (*snd_dice_detect_formats_t)(struct snd_dice *dice);
 
-	struct {
-		/** Number of PCM channels for the corresponding isochronous fw channel. */
-		u8 pcm_channels;
-		/** Number of MIDI ports for the corresponding isochronous fw channel. */
-		u8 midi_ports;
-	} isoc_layout[DICE_MAX_FW_ISOC_CH];
-};
-
-struct dice_stream {
-	struct dice_stream_config config;
-	struct fw_iso_resources resources;
-	struct amdtp_stream stream;
-	struct snd_pcm_substream *pcm_substream;
-};
-
-struct dice_firmware_info {
-	unsigned int ui_base_sdk_version;		// [31-29]:buildFlags,[28-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
-	unsigned int ui_application_version;	// [31-24]:vMaj,[23-20]:vMin,[19-16]:vSub,[15-0]:vBuild
-	unsigned int ui_vendor_id;
-	unsigned int ui_product_id;
-	char build_time[64];
-	char build_date[64];
-	unsigned int ui_board_serial_number;
-};
-
-struct dice_global_settings {
-	u32 owner_hi;
-	u32 owner_lo;
-	u32 notification;
-	char nick_name[NICK_NAME_SIZE];
-	u32 clock_select;
-	u32 enable;
-	u32 status;
-	u32 extended_status;
-	u32 measured_sample_rate;
-	u32 version;
-	/* Old firmware does not necessarily support those two */
-	u32 clock_caps;
-	char clock_source_names[CLOCK_SOURCE_NAMES_SIZE];
-};
-
-struct dice_ext_sync_info {
-	u32 clock_source;
-	u32 locked;
-	u32 rate_index;
-	u32 adat_user_data;
-};
-
-#define DICE_NUM_RATES	7
-#define DICE_NUM_MODES	3
-
-struct dice {
+struct snd_dice {
 	struct snd_card *card;
-	struct snd_pcm *pcm;
 	struct fw_unit *unit;
 	spinlock_t lock;
 	struct mutex mutex;
-	unsigned int vendor;
+
+	/* Offsets for sub-addresses */
 	unsigned int global_offset;
-	unsigned int global_size;
-	unsigned int ext_sync_offset;
 	unsigned int rx_offset;
-	unsigned int rx_size;
 	unsigned int tx_offset;
-	unsigned int tx_size;
+	unsigned int sync_offset;
+	unsigned int rsrv_offset;
 
-	struct dice_global_settings global_settings;
-	struct dice_ext_sync_info extended_sync_info;
+	unsigned int clock_caps;
+	unsigned int tx_pcm_chs[MAX_STREAMS][SND_DICE_RATE_MODE_COUNT];
+	unsigned int rx_pcm_chs[MAX_STREAMS][SND_DICE_RATE_MODE_COUNT];
+	unsigned int tx_midi_ports[MAX_STREAMS];
+	unsigned int rx_midi_ports[MAX_STREAMS];
 
-	struct fw_address_handler fw_notification_handler;
+	struct fw_address_handler notification_handler;
 	int owner_generation;
-	int dev_lock_count; /* > 0 driver, < 0 userspace */
-	bool dev_lock_changed;
-	bool global_enabled;
-	struct completion clock_accepted;
-	wait_queue_head_t hwdep_wait;
 	u32 notification_bits;
 
-	struct workqueue_struct *notif_queue;
+	/* For uapi */
+	int dev_lock_count; /* > 0 driver, < 0 userspace */
+	bool dev_lock_changed;
+	wait_queue_head_t hwdep_wait;
 
-	struct dice_stream playback;
-	struct dice_stream capture;
+	/* For streaming */
+	struct fw_iso_resources tx_resources[MAX_STREAMS];
+	struct fw_iso_resources rx_resources[MAX_STREAMS];
+	struct amdtp_stream tx_stream[MAX_STREAMS];
+	struct amdtp_stream rx_stream[MAX_STREAMS];
+	bool global_enabled:1;
+	bool disable_double_pcm_frames:1;
+	struct completion clock_accepted;
+	unsigned int substreams_counter;
 
-	struct dice_stream_config ladisch_scan_stream_config_results[DICE_NUM_MODES];
-
-	struct dice_firmware_info app_info;
+	struct amdtp_domain domain;
 };
 
-extern const unsigned int dice_rates[DICE_NUM_RATES];
+enum snd_dice_addr_type {
+	SND_DICE_ADDR_TYPE_PRIVATE,
+	SND_DICE_ADDR_TYPE_GLOBAL,
+	SND_DICE_ADDR_TYPE_TX,
+	SND_DICE_ADDR_TYPE_RX,
+	SND_DICE_ADDR_TYPE_SYNC,
+	SND_DICE_ADDR_TYPE_RSRV,
+};
 
-unsigned int dice_rate_to_index(unsigned int rate);
-int dice_rate_index_to_mode(unsigned int rate_index);
-int dice_highest_rate_index_for_mode(struct dice *dice, unsigned int mode);
+int snd_dice_transaction_write(struct snd_dice *dice,
+			       enum snd_dice_addr_type type,
+			       unsigned int offset,
+			       void *buf, unsigned int len);
+int snd_dice_transaction_read(struct snd_dice *dice,
+			      enum snd_dice_addr_type type, unsigned int offset,
+			      void *buf, unsigned int len);
 
-void dice_lock_changed(struct dice *dice);
-int dice_try_lock(struct dice *dice);
-void dice_unlock(struct dice *dice);
-
-static inline u64 dice_global_address(struct dice *dice, unsigned int offset)
+static inline int snd_dice_transaction_write_global(struct snd_dice *dice,
+						    unsigned int offset,
+						    void *buf, unsigned int len)
 {
-	return DICE_PRIVATE_SPACE + dice->global_offset + offset;
+	return snd_dice_transaction_write(dice,
+					  SND_DICE_ADDR_TYPE_GLOBAL, offset,
+					  buf, len);
+}
+static inline int snd_dice_transaction_read_global(struct snd_dice *dice,
+						   unsigned int offset,
+						   void *buf, unsigned int len)
+{
+	return snd_dice_transaction_read(dice,
+					 SND_DICE_ADDR_TYPE_GLOBAL, offset,
+					 buf, len);
+}
+static inline int snd_dice_transaction_write_tx(struct snd_dice *dice,
+						unsigned int offset,
+						void *buf, unsigned int len)
+{
+	return snd_dice_transaction_write(dice, SND_DICE_ADDR_TYPE_TX, offset,
+					  buf, len);
+}
+static inline int snd_dice_transaction_read_tx(struct snd_dice *dice,
+					       unsigned int offset,
+					       void *buf, unsigned int len)
+{
+	return snd_dice_transaction_read(dice, SND_DICE_ADDR_TYPE_TX, offset,
+					 buf, len);
+}
+static inline int snd_dice_transaction_write_rx(struct snd_dice *dice,
+						unsigned int offset,
+						void *buf, unsigned int len)
+{
+	return snd_dice_transaction_write(dice, SND_DICE_ADDR_TYPE_RX, offset,
+					  buf, len);
+}
+static inline int snd_dice_transaction_read_rx(struct snd_dice *dice,
+					       unsigned int offset,
+					       void *buf, unsigned int len)
+{
+	return snd_dice_transaction_read(dice, SND_DICE_ADDR_TYPE_RX, offset,
+					 buf, len);
+}
+static inline int snd_dice_transaction_write_sync(struct snd_dice *dice,
+						  unsigned int offset,
+						  void *buf, unsigned int len)
+{
+	return snd_dice_transaction_write(dice, SND_DICE_ADDR_TYPE_SYNC, offset,
+					  buf, len);
+}
+static inline int snd_dice_transaction_read_sync(struct snd_dice *dice,
+						 unsigned int offset,
+						 void *buf, unsigned int len)
+{
+	return snd_dice_transaction_read(dice, SND_DICE_ADDR_TYPE_SYNC, offset,
+					 buf, len);
 }
 
-static inline u64 dice_rx_address(struct dice *dice,
-			     unsigned int index, unsigned int offset)
-{
-	return DICE_PRIVATE_SPACE + dice->rx_offset +
-			index * dice->rx_size + offset;
-}
+int snd_dice_transaction_get_clock_source(struct snd_dice *dice,
+					  unsigned int *source);
+int snd_dice_transaction_get_rate(struct snd_dice *dice, unsigned int *rate);
+int snd_dice_transaction_set_enable(struct snd_dice *dice);
+void snd_dice_transaction_clear_enable(struct snd_dice *dice);
+int snd_dice_transaction_init(struct snd_dice *dice);
+int snd_dice_transaction_reinit(struct snd_dice *dice);
+void snd_dice_transaction_destroy(struct snd_dice *dice);
 
-static inline u64 dice_tx_address(struct dice *dice,
-			     unsigned int index, unsigned int offset)
-{
-	return DICE_PRIVATE_SPACE + dice->tx_offset +
-			index * dice->tx_size + offset;
-}
+#define SND_DICE_RATES_COUNT	7
+extern const unsigned int snd_dice_rates[SND_DICE_RATES_COUNT];
 
-int dice_ctrl_enable_set(struct dice *dice);
-void dice_ctrl_enable_clear(struct dice *dice);
+int snd_dice_stream_get_rate_mode(struct snd_dice *dice, unsigned int rate,
+				  enum snd_dice_rate_mode *mode);
+int snd_dice_stream_start_duplex(struct snd_dice *dice);
+void snd_dice_stream_stop_duplex(struct snd_dice *dice);
+int snd_dice_stream_init_duplex(struct snd_dice *dice);
+void snd_dice_stream_destroy_duplex(struct snd_dice *dice);
+int snd_dice_stream_reserve_duplex(struct snd_dice *dice, unsigned int rate,
+				   unsigned int events_per_period,
+				   unsigned int events_per_buffer);
+void snd_dice_stream_update_duplex(struct snd_dice *dice);
+int snd_dice_stream_detect_current_formats(struct snd_dice *dice);
 
-/** clock_rate must be one of CLOCK_RATE_XX and already shifted by CLOCK_RATE_SHIFT.
- * TODO: We should do all this stuff within this function.
- */
-int dice_ctrl_change_rate(struct dice *dice, unsigned int clock_rate, bool force);
-int dice_ctrl_set_clock_source(struct dice *dice, u32 clock_source, bool force);
-int dice_ctrl_get_global_clock_select(struct dice *dice, u32 *clock);
+int snd_dice_stream_lock_try(struct snd_dice *dice);
+void snd_dice_stream_lock_release(struct snd_dice *dice);
 
-static inline bool is_clock_source(u32 global_clock_select, u32 clock_source)
-{
-	return (global_clock_select & CLOCK_SOURCE_MASK) == clock_source;
-}
+int snd_dice_create_pcm(struct snd_dice *dice);
 
-static inline bool dice_driver_is_clock_master(u32 global_clock_select)
-{
-	return (global_clock_select & CLOCK_SOURCE_MASK) == CLOCK_SOURCE_ARX1/*||
-			(global_clock_select & CLOCK_SOURCE_MASK) == global_clock_select & CLOCK_SOURCE_ARX2 ||
-			(global_clock_select & CLOCK_SOURCE_MASK) == global_clock_select & CLOCK_SOURCE_ARX3 ||
-			(global_clock_select & CLOCK_SOURCE_MASK) == global_clock_select & CLOCK_SOURCE_ARX4*/;
-}
+int snd_dice_create_hwdep(struct snd_dice *dice);
 
-static inline int dice_ctrl_get_sample_rate(struct dice *dice, unsigned int *sample_rate)
-{
-	int err;
-	unsigned int sample_rate_index;
-	u32 global_clock_select;
+void snd_dice_create_proc(struct snd_dice *dice);
 
-	err = dice_ctrl_get_global_clock_select(dice, &global_clock_select);
-	if (err < 0)
-		return err;
+int snd_dice_create_midi(struct snd_dice *dice);
 
-	sample_rate_index = (global_clock_select & CLOCK_RATE_MASK) >> CLOCK_RATE_SHIFT;
-	*sample_rate = dice_rates[sample_rate_index];
-
-	return 0;
-}
-
-int dice_ctrl_get_ext_sync_info(struct dice *dice, struct dice_ext_sync_info *sync_info);
-int dice_ctrl_get_global_settings(struct dice *dice, struct dice_global_settings *settings);
+int snd_dice_detect_tcelectronic_formats(struct snd_dice *dice);
+int snd_dice_detect_alesis_formats(struct snd_dice *dice);
+int snd_dice_detect_alesis_mastercontrol_formats(struct snd_dice *dice);
+int snd_dice_detect_extension_formats(struct snd_dice *dice);
+int snd_dice_detect_mytek_formats(struct snd_dice *dice);
+int snd_dice_detect_presonus_formats(struct snd_dice *dice);
+int snd_dice_detect_harman_formats(struct snd_dice *dice);
+int snd_dice_detect_focusrite_pro40_tcd3070_formats(struct snd_dice *dice);
 
 #endif

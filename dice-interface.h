@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef SOUND_FIREWIRE_DICE_INTERFACE_H_INCLUDED
 #define SOUND_FIREWIRE_DICE_INTERFACE_H_INCLUDED
 
@@ -64,17 +65,13 @@
 /* Some registers in the Rx/Tx sections may have changed. */
 #define  NOTIFY_RX_CFG_CHG		0x00000001
 #define  NOTIFY_TX_CFG_CHG		0x00000002
-#define  NOTIFY_DUP_ISOC_BIT  0x00000004
-#define  NOTIFY_BW_ERR_BIT  0x00000008
 /* Lock status of the current clock source may have changed. */
 #define  NOTIFY_LOCK_CHG		0x00000010
 /* Write to the clock select register has been finished. */
 #define  NOTIFY_CLOCK_ACCEPTED		0x00000020
-/* (Lock status of some clock source has changed.)
- * TODO: Determine exact background! */
-#define  NOTIFY_INTERFACE_CHG		0x00000040
+/* Lock status of some clock source has changed. */
+#define  NOTIFY_EXT_STATUS		0x00000040
 /* Other bits may be used for device-specific events. */
-
 
 /*
  * A name that can be customized for each device; read/write.  Padded with zero
@@ -178,12 +175,17 @@
 #define GLOBAL_SAMPLE_RATE		0x05c
 
 /*
+ * Some old firmware versions do not have the following global registers.
+ * Windows drivers produced by TCAT lost backward compatibility in its
+ * early release because they can handle firmware only which supports the
+ * following registers.
+ */
+
+/*
  * The version of the DICE driver specification that this device conforms to;
  * read-only.
  */
 #define GLOBAL_VERSION			0x060
-
-/* Some old firmware versions do not have the following global registers: */
 
 /*
  * Supported sample rates and clock sources; read-only.
@@ -255,6 +257,7 @@
 
 /*
  * The speed at which the packets are sent, SCODE_100-_400; read/write.
+ * SCODE_800 is only available in Dice III.
  */
 #define TX_SPEED			0x014
 

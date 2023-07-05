@@ -1,4 +1,6 @@
-# As long we are hacking locally we override the config...
-#CONFIG_SND_DICE := m
-snd-dice-objs := dice.o firmware.o pcm.o stream.o hwdep.o avc.o notif.o
+# SPDX-License-Identifier: GPL-2.0-only
+snd-dice-objs := dice-transaction.o dice-stream.o dice-proc.o dice-midi.o \
+		 dice-pcm.o dice-hwdep.o dice.o dice-tcelectronic.o \
+		 dice-alesis.o dice-extension.o dice-mytek.o dice-presonus.o \
+		 dice-harman.o dice-focusrite.o
 obj-$(CONFIG_SND_DICE) += snd-dice.o
