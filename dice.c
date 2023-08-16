@@ -213,6 +213,10 @@ static int dice_probe(struct fw_unit *unit, const struct ieee1394_device_id *ent
 	if (err < 0)
 		goto error;
 
+	err = dice_snd_ctl_construct(dice);
+	if (err < 0)
+		goto error;
+
 	err = snd_card_register(card);
 	if (err < 0)
 		goto error;

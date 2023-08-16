@@ -224,6 +224,8 @@ void snd_dice_create_proc(struct snd_dice *dice);
 
 int snd_dice_create_midi(struct snd_dice *dice);
 
+int dice_snd_ctl_construct(struct snd_dice* dice);
+
 int snd_dice_detect_tcelectronic_formats(struct snd_dice *dice);
 int snd_dice_detect_alesis_formats(struct snd_dice *dice);
 int snd_dice_detect_alesis_mastercontrol_formats(struct snd_dice *dice);
