@@ -9,6 +9,9 @@
 
 #define OUI_WEISS		0x001c6a
 
+#define READY_TIMEOUT_MS        200
+#define NOTIFICATION_TIMEOUT_MS 100
+
 struct __attribute__ ((__packed__)) avc_su_cmd {
 	u8 ctype;
 	unsigned subunit_type	: 5;
@@ -435,20 +438,36 @@ static int dice_sync_src_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_dice *dice = snd_kcontrol_chip(kcontrol);
 	int err = 0;
-	__be32 new;
-	u32 value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+	__be32 reg, new;
+	u32 data, value;
+
+	value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+
+	err = snd_dice_transaction_read_global(dice, GLOBAL_CLOCK_SELECT,
+										   &reg, sizeof(reg));
+	if (err < 0)
+			return err;
+
+	data = be32_to_cpu(reg);
+	data &= ~CLOCK_SOURCE_MASK;
+	data |= value;
 
 	if (completion_done(&dice->clock_accepted))
-		reinit_completion(&dice->clock_accepted);
+			reinit_completion(&dice->clock_accepted);
 
-	new = cpu_to_be32(value);
+	new = cpu_to_be32(data);
 	err = snd_dice_transaction_write_global(dice, GLOBAL_CLOCK_SELECT,
-						&new, sizeof(new));
-	if (err < 0){
-		printk(KERN_INFO "dice-stream.c::dice_sync_src_put()::460::Error writing clock source.\n");
-		return err;
+											&new, sizeof(new));
+	if (err < 0)
+			return err;
+
+	if (wait_for_completion_timeout(&dice->clock_accepted,
+					msecs_to_jiffies(NOTIFICATION_TIMEOUT_MS)) == 0) {
+			if (reg != new)
+					return -ETIMEDOUT;
 	}
-	return 1;
+
+	return 0;
 }
 
 static int dice_weiss_param_enum_info(struct snd_kcontrol *kcontrol,
