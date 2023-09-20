@@ -8,9 +8,9 @@
 #include "avc.h"
 
 #define OUI_WEISS		0x001c6a
+#define	READY_TIMEOUT_MS	200
+#define NOTIFICATION_TIMEOUT_MS	100
 
-#define READY_TIMEOUT_MS        200
-#define NOTIFICATION_TIMEOUT_MS 100
 
 struct __attribute__ ((__packed__)) avc_su_cmd {
 	u8 ctype;
@@ -439,30 +439,103 @@ static int dice_sync_src_put(struct snd_kcontrol *kcontrol,
 	struct snd_dice *dice = snd_kcontrol_chip(kcontrol);
 	int err = 0;
 	__be32 reg, new;
-	u32 data, value;
-
-	value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+	u32 value = ucontrol->value.enumerated.item[0] & CLOCK_SOURCE_MASK;
+	u32 data;
 
 	err = snd_dice_transaction_read_global(dice, GLOBAL_CLOCK_SELECT,
-										   &reg, sizeof(reg));
+                                               &reg, sizeof(reg));
 	if (err < 0)
-			return err;
+		return err;
 
 	data = be32_to_cpu(reg);
 	data &= ~CLOCK_SOURCE_MASK;
 	data |= value;
 
 	if (completion_done(&dice->clock_accepted))
-			reinit_completion(&dice->clock_accepted);
+		reinit_completion(&dice->clock_accepted);
 
 	new = cpu_to_be32(data);
 	err = snd_dice_transaction_write_global(dice, GLOBAL_CLOCK_SELECT,
 											&new, sizeof(new));
 	if (err < 0)
-			return err;
+		return err;
 
 	if (wait_for_completion_timeout(&dice->clock_accepted,
-					msecs_to_jiffies(NOTIFICATION_TIMEOUT_MS)) == 0) {
+		msecs_to_jiffies(NOTIFICATION_TIMEOUT_MS)) == 0) {
+			if (reg != new)
+				return -ETIMEDOUT;
+	}
+
+	return 0;
+}
+
+static int dice_sync_rate_get(struct snd_kcontrol *kcontrol,
+                              struct snd_ctl_elem_value *ucontrol)
+{
+		struct snd_dice *dice = snd_kcontrol_chip(kcontrol);
+		int err = 0;
+		u32 value = 0;
+		__be32 reg;
+
+		err = snd_dice_transaction_read_global(dice, GLOBAL_CLOCK_SELECT,
+											   &reg, sizeof(reg));
+		if (err < 0) {
+			return err;
+		}
+		value = be32_to_cpu(reg);
+		value &= CLOCK_RATE_MASK;
+		value = (value >> CLOCK_RATE_SHIFT);
+		ucontrol->value.enumerated.item[0] = value;
+
+        return 0;
+}
+
+static int dice_sync_rate_info(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_info *uinfo)
+{
+	static char *texts[11] = {
+		"32000","44100","48000","88200","96000","176400","192000","ANY_LOW","ANY_MID","ANY_HIGH","NONE"
+	};
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
+	uinfo->count = 1;
+	uinfo->value.enumerated.items = 11;
+	if (uinfo->value.enumerated.item > 10)
+		uinfo->value.enumerated.item = 10;
+	strcpy(uinfo->value.enumerated.name, texts[uinfo->value.enumerated.item]);
+
+	return 0;
+}
+
+static int dice_sync_rate_put(struct snd_kcontrol *kcontrol,
+                              struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_dice *dice = snd_kcontrol_chip(kcontrol);
+	int err = 0;
+	__be32 reg, new;
+	u32 value = (ucontrol->value.enumerated.item[0] << CLOCK_RATE_SHIFT) & CLOCK_RATE_MASK;
+	u32 data;
+
+	// Read the current clock source
+	err = snd_dice_transaction_read_global(dice, GLOBAL_CLOCK_SELECT,
+										   &reg, sizeof(reg));
+	if (err < 0)
+		return err;
+
+	data = be32_to_cpu(reg);
+	data &= ~CLOCK_RATE_MASK;
+	data |= value;
+
+	if (completion_done(&dice->clock_accepted))
+		reinit_completion(&dice->clock_accepted);
+
+	new = cpu_to_be32(data);
+	err = snd_dice_transaction_write_global(dice, GLOBAL_CLOCK_SELECT,
+											&new, sizeof(new));
+	if (err < 0)
+		return err;
+
+	if (wait_for_completion_timeout(&dice->clock_accepted,
+		msecs_to_jiffies(NOTIFICATION_TIMEOUT_MS)) == 0) {
 			if (reg != new)
 					return -ETIMEDOUT;
 	}
@@ -665,6 +738,13 @@ int dice_snd_ctl_construct(struct snd_dice* dice)
 			.info = dice_sync_src_info,
 			.get = dice_sync_src_get,
 			.put = dice_sync_src_put,
+		},
+		{
+			.iface = SNDRV_CTL_ELEM_IFACE_CARD,
+			.name = "Sync rate",
+			.info = dice_sync_rate_info,
+			.get = dice_sync_rate_get,
+			.put = dice_sync_rate_put,
 		}
 	};
 	for (i = 0; i < ARRAY_SIZE(controls); ++i) {
